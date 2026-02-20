@@ -20,6 +20,10 @@ local DEFAULT_SETTINGS = {
     showManaTide = true,
     showPotionCooldown = true,
     showAverageMana = true,
+    shortenedStatus = true,
+    showStatusDuration = false,
+    showSolo = false,
+    optionsBgOpacity = 0.9,
     sendWarnings = false,
     warningThresholdHigh = 30,
     warningThresholdMed = 20,
@@ -29,6 +33,7 @@ local DEFAULT_SETTINGS = {
     colorThresholdYellow = 50,
     colorThresholdOrange = 25,
     sortBy = "mana",
+    showRaidCooldowns = true,
     frameWidth = nil,
     frameHeight = nil,
 };
@@ -72,6 +77,8 @@ local SendChatMessage = SendChatMessage;
 local NotifyInspect = NotifyInspect;
 local ClearInspectPlayer = ClearInspectPlayer;
 local CanInspect = CanInspect;
+local GetPlayerInfoByGUID = GetPlayerInfoByGUID;
+local band = bit.band;
 
 --------------------------------------------------------------------------------
 -- Constants
@@ -138,6 +145,21 @@ local INNERVATE_SPELL_ID = 29166;
 local INNERVATE_SPELL_NAME = GetSpellInfo(29166) or "Innervate";
 local MANA_TIDE_BUFF_NAME = GetSpellInfo(16191) or "Mana Tide Totem";
 local DRINKING_SPELL_NAME = GetSpellInfo(430) or "Drink";
+local MANA_TIDE_CAST_SPELL_ID = 16190;
+
+-- Raid-wide cooldown spells tracked at the bottom of the display
+local RAID_COOLDOWN_SPELLS = {
+    [INNERVATE_SPELL_ID] = {
+        name = INNERVATE_SPELL_NAME,
+        icon = select(3, GetSpellInfo(INNERVATE_SPELL_ID)),
+        duration = 360,
+    },
+    [MANA_TIDE_CAST_SPELL_ID] = {
+        name = MANA_TIDE_BUFF_NAME,
+        icon = select(3, GetSpellInfo(MANA_TIDE_CAST_SPELL_ID)),
+        duration = 300,
+    },
+};
 
 --------------------------------------------------------------------------------
 -- State Variables
@@ -165,7 +187,15 @@ local activeRows = {};
 -- Reusable table caches (avoid per-frame allocations)
 local sortedCache = {};
 local rowDataCache = {};
-local statusPartsCache = {};
+local statusLabelParts = {};
+local statusDurParts = {};
+
+-- Raid cooldown tracking
+local raidCooldowns = {};
+local sortedCooldownCache = {};
+local cdRowPool = {};
+local activeCdRows = {};
+local savedRaidCooldowns = nil;
 
 -- Warning state
 local lastWarningTime = 0;
@@ -206,6 +236,8 @@ local function IterateGroupMembers()
                 tinsert(results, unit);
             end
         end
+    elseif db and db.showSolo then
+        tinsert(results, "player");
     end
     return results;
 end
@@ -230,25 +262,77 @@ local function GetClassColor(classFile)
     return 1, 1, 1;
 end
 
+-- Measure helper: get pixel width of a string at a given font size
+-- Measurement FontString lives on UIParent (always visible = reliable GetStringWidth)
+local measureFS;
+local function MeasureText(text, fontSize)
+    if not measureFS then
+        measureFS = UIParent:CreateFontString(nil, "OVERLAY");
+    end
+    measureFS:SetFont("Fonts\\FRIZQT__.TTF", fontSize, "OUTLINE");
+    measureFS:SetText(text);
+    return measureFS:GetStringWidth();
+end
+
+local function FormatDuration(expirationTime, now)
+    if not db.showStatusDuration or expirationTime == 0 then return ""; end
+    local remaining = expirationTime - now;
+    if remaining <= 0 then return ""; end
+    return format("%ds", floor(remaining));
+end
+
+-- Returns two strings: statusLabel (colored label), statusDuration (duration + overflow)
+-- The label and duration are rendered in separate FontStrings for pixel-perfect alignment.
 local function FormatStatusText(data)
-    wipe(statusPartsCache);
+    wipe(statusLabelParts);
+    wipe(statusDurParts);
+    local short = db.shortenedStatus;
+    local now = GetTime();
+
     if data.isDrinking and db.showDrinking then
-        tinsert(statusPartsCache, "|cff55ccffDrink|r");
+        local label = short and "Drink" or "Drinking";
+        tinsert(statusLabelParts, format("|cff55ccff%s|r", label));
+        tinsert(statusDurParts, FormatDuration(data.drinkExpiry, now));
     end
     if data.hasInnervate and db.showInnervate then
-        tinsert(statusPartsCache, "|cffba55d3Inn|r");
+        local label = short and "Inn" or "Innervate";
+        tinsert(statusLabelParts, format("|cffba55d3%s|r", label));
+        tinsert(statusDurParts, FormatDuration(data.innervateExpiry, now));
     end
     if data.hasManaTide and db.showManaTide then
-        tinsert(statusPartsCache, "|cff00c8ffTide|r");
+        local label = short and "Tide" or "Mana Tide";
+        tinsert(statusLabelParts, format("|cff00c8ff%s|r", label));
+        tinsert(statusDurParts, FormatDuration(data.manaTideExpiry, now));
     end
-    local now = GetTime();
     if db.showPotionCooldown and data.potionExpiry and data.potionExpiry > now then
         local remaining = floor(data.potionExpiry - now);
         local minutes = floor(remaining / 60);
         local seconds = remaining % 60;
-        tinsert(statusPartsCache, format("|cffffaa00Pot %d:%02d|r", minutes, seconds));
+        local label = short and "Pot" or "Potion";
+        tinsert(statusLabelParts, format("|cffffaa00%s|r", label));
+        tinsert(statusDurParts, format("%d:%02d", minutes, seconds));
     end
-    return concat(statusPartsCache, "  ");
+
+    if #statusLabelParts == 0 then return "", ""; end
+
+    -- Primary status: label in first FontString, duration in second
+    local labelStr = statusLabelParts[1];
+    local durStr = statusDurParts[1];
+
+    -- Additional statuses: append full "Label Dur" to duration string
+    for i = 2, #statusLabelParts do
+        local extra = statusLabelParts[i];
+        if statusDurParts[i] ~= "" then
+            extra = extra .. " " .. statusDurParts[i];
+        end
+        if durStr ~= "" then
+            durStr = durStr .. "  " .. extra;
+        else
+            durStr = extra;
+        end
+    end
+
+    return labelStr, durStr;
 end
 
 --------------------------------------------------------------------------------
@@ -499,6 +583,13 @@ ScanGroupComposition = function()
             inspectRetries[guid] = nil;
         end
     end
+
+    -- Remove raid cooldowns from departed members
+    for key, entry in pairs(raidCooldowns) do
+        if not seenGUIDs[entry.sourceGUID] then
+            raidCooldowns[key] = nil;
+        end
+    end
 end
 
 local function GetSortedHealers()
@@ -572,22 +663,28 @@ local function UpdateUnitBuffs(unit)
     data.isDrinking = false;
     data.hasInnervate = false;
     data.hasManaTide = false;
+    data.drinkExpiry = 0;
+    data.innervateExpiry = 0;
+    data.manaTideExpiry = 0;
 
     local i = 1;
     while true do
-        local name, _, _, _, _, _, _, _, _, spellId = UnitBuff(unit, i);
+        local name, _, _, _, _, expirationTime, _, _, _, spellId = UnitBuff(unit, i);
         if not name then break; end
 
         if name == DRINKING_SPELL_NAME or name == "Drink" or name == "Food & Drink" then
             data.isDrinking = true;
+            data.drinkExpiry = expirationTime or 0;
         end
 
         if spellId == INNERVATE_SPELL_ID or name == INNERVATE_SPELL_NAME then
             data.hasInnervate = true;
+            data.innervateExpiry = expirationTime or 0;
         end
 
         if name == MANA_TIDE_BUFF_NAME or name == "Mana Tide" then
             data.hasManaTide = true;
+            data.manaTideExpiry = expirationTime or 0;
         end
 
         i = i + 1;
@@ -603,19 +700,53 @@ local function UpdateAllHealerBuffs()
 end
 
 --------------------------------------------------------------------------------
+-- Raid Cooldown Cleanup
+--------------------------------------------------------------------------------
+
+local function CleanExpiredCooldowns()
+    local now = GetTime();
+    for key, entry in pairs(raidCooldowns) do
+        if entry.expiryTime <= now then
+            raidCooldowns[key] = nil;
+        end
+    end
+end
+
+--------------------------------------------------------------------------------
 -- Potion Tracking via Combat Log
 --------------------------------------------------------------------------------
 
 local function ProcessCombatLog()
-    local _, subevent, _, sourceGUID, sourceName, _, _, _, _, _, _, spellId, spellName =
+    local _, subevent, _, sourceGUID, sourceName, sourceFlags, _, _, _, _, _, spellId, spellName =
         CombatLogGetCurrentEventInfo();
 
     if subevent ~= "SPELL_CAST_SUCCESS" then return; end
-    if not POTION_SPELL_IDS[spellId] then return; end
 
-    local data = healers[sourceGUID];
-    if data and data.isHealer then
-        data.potionExpiry = GetTime() + POTION_COOLDOWN_DURATION;
+    -- Potion tracking (existing)
+    if POTION_SPELL_IDS[spellId] then
+        local data = healers[sourceGUID];
+        if data and data.isHealer then
+            data.potionExpiry = GetTime() + POTION_COOLDOWN_DURATION;
+        end
+    end
+
+    -- Raid cooldown tracking
+    local cdInfo = RAID_COOLDOWN_SPELLS[spellId];
+    if cdInfo and db.showRaidCooldowns then
+        -- Verify source is in our group (COMBATLOG_OBJECT_AFFILIATION_MINE/PARTY/RAID = 0x07)
+        if sourceFlags and band(sourceFlags, 0x07) ~= 0 then
+            local _, engClass = GetPlayerInfoByGUID(sourceGUID);
+            local key = sourceGUID .. "-" .. spellId;
+            raidCooldowns[key] = {
+                sourceGUID = sourceGUID,
+                name = sourceName or "Unknown",
+                classFile = engClass or "UNKNOWN",
+                spellId = spellId,
+                icon = cdInfo.icon,
+                spellName = cdInfo.name,
+                expiryTime = GetTime() + cdInfo.duration,
+            };
+        end
     end
 end
 
@@ -694,6 +825,12 @@ HealerManaFrame.separator:SetHeight(1);
 HealerManaFrame.separator:SetColorTexture(0.5, 0.5, 0.5, 0.4);
 HealerManaFrame.separator:Hide();
 
+-- Separator line above cooldown section
+HealerManaFrame.cdSeparator = HealerManaFrame:CreateTexture(nil, "ARTWORK");
+HealerManaFrame.cdSeparator:SetHeight(1);
+HealerManaFrame.cdSeparator:SetColorTexture(0.5, 0.5, 0.5, 0.4);
+HealerManaFrame.cdSeparator:Hide();
+
 -- Drag handlers
 HealerManaFrame:RegisterForDrag("LeftButton");
 HealerManaFrame:SetScript("OnDragStart", function(self)
@@ -728,6 +865,8 @@ local WIDTH_MIN = 120;
 local WIDTH_MAX = 600;
 local HEIGHT_MIN = 30;
 local HEIGHT_MAX = 600;
+local contentMinWidth = WIDTH_MIN;
+local contentMinHeight = HEIGHT_MIN;
 local resizeStartCursorX, resizeStartCursorY, resizeStartW, resizeStartH;
 
 resizeHandle:SetScript("OnMouseDown", function(self, button)
@@ -741,8 +880,8 @@ resizeHandle:SetScript("OnMouseDown", function(self, button)
         local cursorX, cursorY = GetCursorPosition();
         local dx = (cursorX - resizeStartCursorX) / effectiveScale;
         local dy = (resizeStartCursorY - cursorY) / effectiveScale;
-        local newW = max(WIDTH_MIN, min(WIDTH_MAX, resizeStartW + dx));
-        local newH = max(HEIGHT_MIN, min(HEIGHT_MAX, resizeStartH + dy));
+        local newW = max(contentMinWidth, min(WIDTH_MAX, resizeStartW + dx));
+        local newH = max(contentMinHeight, min(HEIGHT_MAX, resizeStartH + dy));
         db.frameWidth = floor(newW + 0.5);
         db.frameHeight = floor(newH + 0.5);
         HealerManaFrame:SetWidth(db.frameWidth);
@@ -769,18 +908,6 @@ HealerManaFrame:HookScript("OnHide", UpdateResizeHandleVisibility);
 -- Row Frame Pool
 --------------------------------------------------------------------------------
 
--- Measure helper: get pixel width of a string at a given font size
--- Measurement FontString lives on UIParent (always visible = reliable GetStringWidth)
-local measureFS;
-local function MeasureText(text, fontSize)
-    if not measureFS then
-        measureFS = UIParent:CreateFontString(nil, "OVERLAY");
-    end
-    measureFS:SetFont("Fonts\\FRIZQT__.TTF", fontSize, "OUTLINE");
-    measureFS:SetText(text);
-    return measureFS:GetStringWidth();
-end
-
 local function CreateRowFrame()
     local frame = CreateFrame("Frame", nil, HealerManaFrame);
     frame:SetSize(400, 16);
@@ -796,9 +923,13 @@ local function CreateRowFrame()
     frame.manaText = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall");
     frame.manaText:SetJustifyH("RIGHT");
 
-    -- Status: free-flowing after mana column
+    -- Status label: fixed-width column after mana
     frame.statusText = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall");
     frame.statusText:SetJustifyH("LEFT");
+
+    -- Status duration: left-aligned after the label column
+    frame.durationText = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall");
+    frame.durationText:SetJustifyH("LEFT");
 
     return frame;
 end
@@ -820,6 +951,50 @@ local function ReleaseAllRows()
 end
 
 --------------------------------------------------------------------------------
+-- Cooldown Row Frame Pool
+--------------------------------------------------------------------------------
+
+local function CreateCdRowFrame()
+    local frame = CreateFrame("Frame", nil, HealerManaFrame);
+    frame:SetSize(400, 16);
+    frame:Hide();
+
+    -- Spell icon (left-anchored, trimmed borders)
+    frame.icon = frame:CreateTexture(nil, "ARTWORK");
+    frame.icon:SetSize(14, 14);
+    frame.icon:SetPoint("LEFT", 0, 0);
+    frame.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92);
+
+    -- Caster name (class-colored, after icon)
+    frame.nameText = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall");
+    frame.nameText:SetPoint("LEFT", frame.icon, "RIGHT", 4, 0);
+    frame.nameText:SetJustifyH("LEFT");
+    frame.nameText:SetWordWrap(false);
+
+    -- Timer countdown
+    frame.timerText = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall");
+    frame.timerText:SetJustifyH("LEFT");
+
+    return frame;
+end
+
+local function AcquireCdRow()
+    return tremove(cdRowPool) or CreateCdRowFrame();
+end
+
+local function ReleaseCdRow(frame)
+    frame:Hide();
+    frame:ClearAllPoints();
+    tinsert(cdRowPool, frame);
+end
+
+local function ReleaseAllCdRows()
+    for i = #activeCdRows, 1, -1 do
+        ReleaseCdRow(tremove(activeCdRows, i));
+    end
+end
+
+--------------------------------------------------------------------------------
 -- Display Update
 --------------------------------------------------------------------------------
 
@@ -829,7 +1004,7 @@ RefreshDisplay = function()
         return;
     end
 
-    if not previewActive and not IsInGroup() then
+    if not previewActive and not IsInGroup() and not db.showSolo then
         HealerManaFrame:Hide();
         return;
     end
@@ -854,7 +1029,8 @@ RefreshDisplay = function()
     wipe(rowDataCache);
     local maxNameWidth = 0;
     local maxManaWidth = 0;
-    local maxStatusWidth = 0;
+    local maxStatusLabelWidth = 0;
+    local maxStatusDurWidth = 0;
 
     for _, data in ipairs(sortedHealers) do
         local manaStr;
@@ -866,25 +1042,32 @@ RefreshDisplay = function()
             manaStr = format("%d%%", data.manaPercent);
         end
 
-        local statusStr = FormatStatusText(data);
+        local statusLabel, statusDur = FormatStatusText(data);
         -- Measure without color codes for accurate width
-        local statusPlain = statusStr:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", "");
+        local labelPlain = statusLabel:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", "");
+        local durPlain = statusDur:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", "");
 
         local nw = MeasureText(data.name, db.fontSize);
         local mw = MeasureText(manaStr, db.fontSize);
-        local sw = 0;
-        if statusPlain ~= "" then
-            sw = MeasureText(statusPlain, db.fontSize - 1);
+        local slw = 0;
+        if labelPlain ~= "" then
+            slw = MeasureText(labelPlain, db.fontSize - 1);
+        end
+        local sdw = 0;
+        if durPlain ~= "" then
+            sdw = MeasureText(durPlain, db.fontSize - 1);
         end
 
         if nw > maxNameWidth then maxNameWidth = nw; end
         if mw > maxManaWidth then maxManaWidth = mw; end
-        if sw > maxStatusWidth then maxStatusWidth = sw; end
+        if slw > maxStatusLabelWidth then maxStatusLabelWidth = slw; end
+        if sdw > maxStatusDurWidth then maxStatusDurWidth = sdw; end
 
         tinsert(rowDataCache, {
             data = data,
             manaStr = manaStr,
-            statusStr = statusStr,
+            statusLabel = statusLabel,
+            statusDur = statusDur,
         });
     end
 
@@ -892,19 +1075,25 @@ RefreshDisplay = function()
     local pad = max(4, floor(db.fontSize * 0.35 + 0.5));
     maxNameWidth = maxNameWidth + pad;
     maxManaWidth = maxManaWidth + pad;
-    if maxStatusWidth > 0 then
-        maxStatusWidth = maxStatusWidth + pad;
+    if maxStatusLabelWidth > 0 then
+        maxStatusLabelWidth = maxStatusLabelWidth + pad;
+    end
+    if maxStatusDurWidth > 0 then
+        maxStatusDurWidth = maxStatusDurWidth + pad;
     end
 
     -- Calculate total width from actual content
     local contentWidth = maxNameWidth + colGap + maxManaWidth;
-    if maxStatusWidth > 0 then
-        contentWidth = contentWidth + colGap + maxStatusWidth;
+    if maxStatusLabelWidth > 0 then
+        contentWidth = contentWidth + colGap + maxStatusLabelWidth;
+        if maxStatusDurWidth > 0 then
+            contentWidth = contentWidth + colGap + maxStatusDurWidth;
+        end
     end
     local totalWidth = leftMargin + contentWidth + rightMargin;
 
-    -- Ensure minimum width (respect user-set width if wider than content)
-    totalWidth = max(totalWidth, db.frameWidth or 120, 120);
+    -- Ensure minimum width
+    totalWidth = max(totalWidth, 120);
 
     local yOffset = -topPadding;
 
@@ -943,15 +1132,19 @@ RefreshDisplay = function()
         row.nameText:SetFont(fontPath, db.fontSize, "OUTLINE");
         row.manaText:SetFont(fontPath, db.fontSize, "OUTLINE");
         row.statusText:SetFont(fontPath, db.fontSize - 1, "OUTLINE");
+        row.durationText:SetFont(fontPath, db.fontSize - 1, "OUTLINE");
 
         -- Column widths and anchors
         row.nameText:SetWidth(maxNameWidth);
         row.manaText:SetWidth(maxManaWidth);
+        row.statusText:SetWidth(maxStatusLabelWidth);
 
         row.manaText:ClearAllPoints();
         row.manaText:SetPoint("LEFT", row.nameText, "RIGHT", colGap, 0);
         row.statusText:ClearAllPoints();
         row.statusText:SetPoint("LEFT", row.manaText, "RIGHT", colGap, 0);
+        row.durationText:ClearAllPoints();
+        row.durationText:SetPoint("LEFT", row.statusText, "RIGHT", colGap, 0);
 
         -- Class-colored name
         local cr, cg, cb = GetClassColor(data.classFile);
@@ -968,8 +1161,9 @@ RefreshDisplay = function()
             row.manaText:SetTextColor(mr, mg, mb);
         end
 
-        -- Status indicators
-        row.statusText:SetText(rd.statusStr);
+        -- Status label + duration (separate FontStrings for alignment)
+        row.statusText:SetText(rd.statusLabel);
+        row.durationText:SetText(rd.statusDur);
 
         row:SetPoint("TOPLEFT", HealerManaFrame, "TOPLEFT", leftMargin, yOffset);
         row:Show();
@@ -978,9 +1172,93 @@ RefreshDisplay = function()
         yOffset = yOffset - rowHeight;
     end
 
-    -- Resize frame to fit content (respect user-set dimensions as minimums)
+    -- Raid cooldown section
+    ReleaseAllCdRows();
+    HealerManaFrame.cdSeparator:Hide();
+
+    if db.showRaidCooldowns then
+        -- Collect active cooldowns into sorted cache
+        wipe(sortedCooldownCache);
+        for _, entry in pairs(raidCooldowns) do
+            tinsert(sortedCooldownCache, entry);
+        end
+
+        if #sortedCooldownCache > 0 then
+            sort(sortedCooldownCache, function(a, b)
+                return a.expiryTime < b.expiryTime;
+            end);
+
+            -- Draw separator
+            yOffset = yOffset - 4;
+            HealerManaFrame.cdSeparator:ClearAllPoints();
+            HealerManaFrame.cdSeparator:SetPoint("TOPLEFT", HealerManaFrame, "TOPLEFT", leftMargin, yOffset);
+            HealerManaFrame.cdSeparator:SetPoint("TOPRIGHT", HealerManaFrame, "TOPRIGHT", -rightMargin, yOffset);
+            HealerManaFrame.cdSeparator:Show();
+            yOffset = yOffset - 4;
+
+            -- Measure max name width for alignment
+            local cdNameMax = 0;
+            local cdTimerMax = 0;
+            local iconSize = max(db.fontSize, 12);
+            local cdFontSize = db.fontSize - 1;
+            local now = GetTime();
+
+            for _, entry in ipairs(sortedCooldownCache) do
+                local nw = MeasureText(entry.name, cdFontSize);
+                if nw > cdNameMax then cdNameMax = nw; end
+                local remaining = max(0, entry.expiryTime - now);
+                local timerStr = format("%d:%02d", floor(remaining / 60), floor(remaining) % 60);
+                local tw = MeasureText(timerStr, cdFontSize);
+                if tw > cdTimerMax then cdTimerMax = tw; end
+            end
+
+            local cdPad = max(4, floor(cdFontSize * 0.35 + 0.5));
+            cdNameMax = cdNameMax + cdPad;
+            cdTimerMax = cdTimerMax + cdPad;
+
+            -- Check if cooldown section is wider than healer content
+            local cdContentWidth = iconSize + 4 + cdNameMax + colGap + cdTimerMax;
+            local cdTotalWidth = leftMargin + cdContentWidth + rightMargin;
+            if cdTotalWidth > totalWidth then totalWidth = cdTotalWidth; end
+
+            -- Render cooldown rows
+            for _, entry in ipairs(sortedCooldownCache) do
+                local cdRow = AcquireCdRow();
+
+                cdRow.icon:SetSize(iconSize, iconSize);
+                cdRow.icon:SetTexture(entry.icon);
+
+                cdRow.nameText:SetFont(fontPath, cdFontSize, "OUTLINE");
+                cdRow.nameText:SetWidth(cdNameMax);
+                local cr, cg, cb = GetClassColor(entry.classFile);
+                cdRow.nameText:SetText(entry.name);
+                cdRow.nameText:SetTextColor(cr, cg, cb);
+
+                cdRow.timerText:ClearAllPoints();
+                cdRow.timerText:SetPoint("LEFT", cdRow.nameText, "RIGHT", colGap, 0);
+                cdRow.timerText:SetFont(fontPath, cdFontSize, "OUTLINE");
+                local remaining = max(0, entry.expiryTime - now);
+                cdRow.timerText:SetText(format("%d:%02d", floor(remaining / 60), floor(remaining) % 60));
+                cdRow.timerText:SetTextColor(0.8, 0.8, 0.8);
+
+                cdRow:SetSize(totalWidth, rowHeight);
+                cdRow:SetPoint("TOPLEFT", HealerManaFrame, "TOPLEFT", leftMargin, yOffset);
+                cdRow:Show();
+                tinsert(activeCdRows, cdRow);
+
+                yOffset = yOffset - rowHeight;
+            end
+        end
+    end
+
+    -- Track content-driven minimums (used by resize handle to prevent clipping)
     local totalHeight = -yOffset + bottomPadding;
+    contentMinWidth = totalWidth;
+    contentMinHeight = totalHeight;
+
+    -- Respect user-set dimensions as minimums
     totalHeight = max(totalHeight, db.frameHeight or 30);
+    totalWidth = max(totalWidth, db.frameWidth or 120);
     HealerManaFrame:SetHeight(totalHeight);
     HealerManaFrame:SetWidth(totalWidth);
     HealerManaFrame:Show();
@@ -1001,16 +1279,34 @@ HealerManaFrame:SetScript("OnUpdate", function(self, elapsed)
         if previewActive then
             -- Animate mock mana values: slow drift with occasional drinking recovery
             previewTimer = previewTimer + UPDATE_INTERVAL;
+            local now = GetTime();
             for guid, data in pairs(healers) do
-                if data.isHealer then
+                if data.isHealer and data.baseMana then
                     local seed = (data.driftSeed or 1);
                     local drift = sin(previewTimer * 0.4 * seed) * 0.8 + cos(previewTimer * 0.15 * seed) * 0.5;
                     data.manaPercent = max(0, min(100, data.baseMana + floor(drift * 12)));
+                    -- Loop status durations so they restart after expiring
+                    if data.isDrinking and data.drinkExpiry > 0 and data.drinkExpiry <= now then
+                        data.drinkExpiry = now + 18;
+                    end
+                    if data.hasInnervate and data.innervateExpiry > 0 and data.innervateExpiry <= now then
+                        data.innervateExpiry = now + 12;
+                    end
+                    if data.hasManaTide and data.manaTideExpiry > 0 and data.manaTideExpiry <= now then
+                        data.manaTideExpiry = now + 8;
+                    end
+                end
+            end
+            -- Loop preview raid cooldown timers
+            for _, entry in pairs(raidCooldowns) do
+                if entry.expiryTime <= now then
+                    entry.expiryTime = now + RAID_COOLDOWN_SPELLS[entry.spellId].duration;
                 end
             end
         else
             UpdateManaValues();
             UpdateAllHealerBuffs();
+            CleanExpiredCooldowns();
             CheckManaWarnings();
         end
 
@@ -1087,9 +1383,40 @@ local function StartPreview()
             isDrinking = td.isDrinking or false,
             hasInnervate = td.hasInnervate or false,
             hasManaTide = td.hasManaTide or false,
+            drinkExpiry = td.isDrinking and (GetTime() + 18) or 0,
+            innervateExpiry = td.hasInnervate and (GetTime() + 12) or 0,
+            manaTideExpiry = td.hasManaTide and (GetTime() + 8) or 0,
             potionExpiry = 0,
         };
     end
+
+    -- Save and inject mock raid cooldowns
+    savedRaidCooldowns = {};
+    for key, entry in pairs(raidCooldowns) do
+        savedRaidCooldowns[key] = entry;
+    end
+    wipe(raidCooldowns);
+    local now = GetTime();
+    local innervateInfo = RAID_COOLDOWN_SPELLS[INNERVATE_SPELL_ID];
+    local manaTideInfo = RAID_COOLDOWN_SPELLS[MANA_TIDE_CAST_SPELL_ID];
+    raidCooldowns["preview-inn"] = {
+        sourceGUID = "preview-guid-2",
+        name = "Treehugger",
+        classFile = "DRUID",
+        spellId = INNERVATE_SPELL_ID,
+        icon = innervateInfo.icon,
+        spellName = innervateInfo.name,
+        expiryTime = now + 240,
+    };
+    raidCooldowns["preview-tide"] = {
+        sourceGUID = "preview-guid-4",
+        name = "Tidecaller",
+        classFile = "SHAMAN",
+        spellId = MANA_TIDE_CAST_SPELL_ID,
+        icon = manaTideInfo.icon,
+        spellName = manaTideInfo.name,
+        expiryTime = now + 180,
+    };
 
     -- Unlock frame for dragging while options are open
     HealerManaFrame:EnableMouse(true);
@@ -1109,6 +1436,15 @@ local function StopPreview()
         savedHealers = nil;
     end
 
+    -- Restore real raid cooldowns
+    wipe(raidCooldowns);
+    if savedRaidCooldowns then
+        for key, entry in pairs(savedRaidCooldowns) do
+            raidCooldowns[key] = entry;
+        end
+        savedRaidCooldowns = nil;
+    end
+
     -- Restore lock state
     HealerManaFrame:EnableMouse(not db.locked);
     RefreshDisplay();
@@ -1122,9 +1458,9 @@ local OptionsFrame;
 
 -- Backdrop templates (matching ScrollingLoot style)
 local FrameBackdrop = {
-    bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background",
+    bgFile = "Interface\\ChatFrame\\ChatFrameBackground",
     edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
-    tile = true, tileSize = 32, edgeSize = 32,
+    tile = true, tileSize = 16, edgeSize = 32,
     insets = { left = 8, right = 8, top = 8, bottom = 8 }
 };
 
@@ -1383,10 +1719,10 @@ local function CreateOptionsFrame()
     if OptionsFrame then return OptionsFrame; end
 
     local frame = CreateFrame("Frame", "HealerManaOptionsFrame", UIParent, "BackdropTemplate");
-    frame:SetSize(520, 560);
+    frame:SetSize(520, 680);
     frame:SetPoint("CENTER");
     frame:SetBackdrop(FrameBackdrop);
-    frame:SetBackdropColor(0, 0, 0, 1);
+    frame:SetBackdropColor(0, 0, 0, db.optionsBgOpacity);
     frame:SetMovable(true);
     frame:EnableMouse(true);
     frame:SetToplevel(true);
@@ -1453,6 +1789,17 @@ local function CreateOptionsFrame()
     end;
     y = y - 26;
 
+    local showSoloCheck = CreateCheckbox(frame, "Show When Solo", contentWidth);
+    showSoloCheck:SetPoint("TOPLEFT", leftX, y);
+    showSoloCheck:SetValue(db.showSolo);
+    showSoloCheck.OnValueChanged = function(self, value)
+        db.showSolo = value;
+        if not previewActive and value and not IsInGroup() then
+            ScanGroupComposition();
+        end
+    end;
+    y = y - 26;
+
     local showAvgCheck = CreateCheckbox(frame, "Show Average Mana", contentWidth);
     showAvgCheck:SetPoint("TOPLEFT", leftX, y);
     showAvgCheck:SetValue(db.showAverageMana);
@@ -1490,6 +1837,30 @@ local function CreateOptionsFrame()
     showPotionCheck:SetValue(db.showPotionCooldown);
     showPotionCheck.OnValueChanged = function(self, value)
         db.showPotionCooldown = value;
+    end;
+    y = y - 26;
+
+    local showRaidCdCheck = CreateCheckbox(frame, "Show Raid Cooldowns", contentWidth);
+    showRaidCdCheck:SetPoint("TOPLEFT", leftX, y);
+    showRaidCdCheck:SetValue(db.showRaidCooldowns);
+    showRaidCdCheck.OnValueChanged = function(self, value)
+        db.showRaidCooldowns = value;
+    end;
+    y = y - 26;
+
+    local shortenedCheck = CreateCheckbox(frame, "Shortened Status Labels", contentWidth);
+    shortenedCheck:SetPoint("TOPLEFT", leftX, y);
+    shortenedCheck:SetValue(db.shortenedStatus);
+    shortenedCheck.OnValueChanged = function(self, value)
+        db.shortenedStatus = value;
+    end;
+    y = y - 26;
+
+    local showDurationCheck = CreateCheckbox(frame, "Show Buff Durations", contentWidth);
+    showDurationCheck:SetPoint("TOPLEFT", leftX, y);
+    showDurationCheck:SetValue(db.showStatusDuration);
+    showDurationCheck.OnValueChanged = function(self, value)
+        db.showStatusDuration = value;
     end;
     y = y - 26;
 
@@ -1577,12 +1948,21 @@ local function CreateOptionsFrame()
     end;
     y = y - 58;
 
-    local bgOpacitySlider = CreateSlider(frame, "Background Opacity (%)", 0, 100, 5, contentWidth);
+    local bgOpacitySlider = CreateSlider(frame, "Display Opacity (%)", 0, 100, 5, contentWidth);
     bgOpacitySlider:SetPoint("TOPLEFT", rightX, y);
     bgOpacitySlider:SetValue(db.bgOpacity * 100);
     bgOpacitySlider.OnValueChanged = function(self, value)
         db.bgOpacity = value / 100;
         HealerManaFrame:SetBackdropColor(0, 0, 0, db.bgOpacity);
+    end;
+    y = y - 58;
+
+    local optBgSlider = CreateSlider(frame, "Options Panel Opacity (%)", 0, 100, 5, contentWidth);
+    optBgSlider:SetPoint("TOPLEFT", rightX, y);
+    optBgSlider:SetValue(db.optionsBgOpacity * 100);
+    optBgSlider.OnValueChanged = function(self, value)
+        db.optionsBgOpacity = value / 100;
+        frame:SetBackdropColor(0, 0, 0, db.optionsBgOpacity);
     end;
     y = y - 62;
 
@@ -1639,11 +2019,15 @@ local function CreateOptionsFrame()
         end
         -- Refresh all widgets
         enabledCheck:SetValue(db.enabled);
+        showSoloCheck:SetValue(db.showSolo);
         showAvgCheck:SetValue(db.showAverageMana);
         showDrinkCheck:SetValue(db.showDrinking);
         showInnervateCheck:SetValue(db.showInnervate);
         showManaTideCheck:SetValue(db.showManaTide);
         showPotionCheck:SetValue(db.showPotionCooldown);
+        showRaidCdCheck:SetValue(db.showRaidCooldowns);
+        shortenedCheck:SetValue(db.shortenedStatus);
+        showDurationCheck:SetValue(db.showStatusDuration);
         lockedCheck:SetValue(db.locked);
         sendWarnCheck:SetValue(db.sendWarnings);
         warnCooldownSlider:SetValue(db.warningCooldown);
@@ -1657,6 +2041,8 @@ local function CreateOptionsFrame()
         yellowSlider:SetValue(db.colorThresholdYellow);
         orangeSlider:SetValue(db.colorThresholdOrange);
         sortDropdown:SetValue(db.sortBy);
+        optBgSlider:SetValue(db.optionsBgOpacity * 100);
+        frame:SetBackdropColor(0, 0, 0, db.optionsBgOpacity);
         -- Reset frame position
         HealerManaFrame:SetScale(db.scale);
         HealerManaFrame:SetBackdropColor(0, 0, 0, db.bgOpacity);
@@ -1732,7 +2118,7 @@ local function OnEvent(self, event, ...)
         print("|cff00ff00HealerMana|r loaded. Type |cff00ffff/hm|r for options.");
 
     elseif event == "PLAYER_LOGIN" then
-        if IsInGroup() then
+        if IsInGroup() or db.showSolo then
             ScanGroupComposition();
         end
 
