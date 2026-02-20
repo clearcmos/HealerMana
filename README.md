@@ -1,37 +1,80 @@
 # HealerMana
 
-A lightweight healer mana tracker for WoW Classic Anniversary Edition (TBC 2.5.5).
+**HealerMana** tracks healer mana in group content with smart healer detection via talent inspection.
+
+Built specifically for **TBC Classic Anniversary**.
+
+---
 
 ## Features
 
-- **Smart Healer Detection** — Automatically identifies healers by inspecting their talent spec. No manual role assignment needed.
-- **Mana Display** — Shows each healer's mana percentage with color coding (green → yellow → orange → red)
-- **Average Mana** — Displays the average mana across all healers at the top
-- **Status Indicators** — Shows when healers are Drinking, have Innervate, or Mana Tide Totem active
-- **Potion Tracking** — Tracks potion cooldowns (2 min) via combat log
-- **Chat Warnings** — Optional automatic warnings to party/raid when healer mana drops below configurable thresholds
-- **Works Everywhere** — Party, raid, battlegrounds, and arena
-- **Fully Configurable** — Options panel with font size, scale, opacity, color thresholds, warning thresholds, and more
+- **Smart healer detection** - Automatically identifies healers by inspecting their talent spec. No manual role assignment needed.
+- **Color-coded mana display** - Shows each healer's mana percentage with color coding (green/yellow/orange/red)
+- **Average mana** - Displays the average mana across all healers at the top
+- **Status indicators** - Shows when healers are Drinking, have Innervate, or Mana Tide Totem active, with optional durations
+- **Potion tracking** - Tracks potion cooldowns (2 min) via combat log
+- **Raid cooldown tracking** - Monitors Innervate, Mana Tide, Bloodlust/Heroism, Power Infusion, Divine Intervention, Rebirth, and Lay on Hands with per-caster countdown timers
+- **Dead/DC detection** - Grey indicators for dead or disconnected healers
+- **Chat warnings** - Optional automatic warnings to party/raid when healer mana drops below configurable thresholds
+- **Sorting** - Sort healers by lowest mana first or alphabetically
+- **Resizable frame** - Drag the corner handle to resize (visible when unlocked)
+- **Fully configurable** - Options panel with font size, scale, opacity, color thresholds, warning thresholds, and more
+- **Live preview** - See your changes instantly with animated mock data while configuring
+
+---
 
 ## Usage
 
-- `/hm` — Open options panel
-- `/hm lock` — Toggle frame lock (drag to reposition when unlocked)
-- `/hm test` — Show test data to preview the display
-- `/hm reset` — Reset all settings to defaults
+Type `/hm` to open the options panel.
 
-## How It Works
+### Slash Commands
 
-In Classic Anniversary, players rarely set group roles manually. HealerMana uses a layered detection approach:
+- `/hm` - Open options panel
+- `/hm lock` - Toggle frame lock (drag to reposition when unlocked)
+- `/hm test` - Show test data to preview the display
+- `/hm reset` - Reset all settings to defaults
+- `/hm help` - Show available commands
 
-1. **Assigned Role** — If someone is assigned as Healer via the group UI, trust it immediately
-2. **Class Filter** — Only Priest, Druid, Paladin, and Shaman can be healers
-3. **Talent Inspection** — Inspects group members to determine their primary talent tree and whether it's a healing spec
+---
 
-The addon queues inspections automatically, handles range/combat limitations, and caches results so it works seamlessly even during combat.
+## Configuration Options
 
-## Installation
+**Display Settings**
+- Enable/Disable addon
+- Show when solo
+- Show average mana
+- Show Drinking, Innervate, Mana Tide status
+- Show potion cooldowns
+- Show raid cooldowns
+- Shortened status labels
+- Show buff durations
+- Lock frame position
 
-1. Download and extract to your `Interface/AddOns/` folder
-2. The folder should be named `HealerMana` containing `HealerMana.toc` and `HealerMana.lua`
-3. Restart WoW or `/reload`
+**Chat Warnings**
+- Enable/Disable warning messages
+- Warning cooldown (seconds)
+- High, medium, and low mana thresholds
+
+**Appearance**
+- Font size
+- Scale
+- Display opacity
+- Options panel opacity
+
+**Mana Color Thresholds**
+- Green, yellow, and orange percentage thresholds
+
+**Sorting**
+- Lowest mana first or alphabetical
+
+---
+
+## License
+
+MIT License - Open source and free to use.
+
+---
+
+## Feedback & Issues
+
+Found a bug or have a suggestion? Reach me on Discord: `_cmos` or open an issue on GitHub: https://github.com/clearcmos/HealerMana

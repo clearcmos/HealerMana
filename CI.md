@@ -27,14 +27,18 @@ The recommended tool is [BigWigsMods/packager](https://github.com/marketplace/ac
 ### 3. Add Secrets to GitHub Repository
 
 1. Go to your repo on GitHub
-2. Navigate to **Settings → Secrets and variables → Actions**
+2. Navigate to **Settings > Secrets and variables > Actions**
 3. Add these repository secrets:
    - `CF_API_KEY` — Your CurseForge API token
    - `CURSEFORGE_PROJECT_ID` — Your addon's project ID
 
 ### 4. Create the GitHub Actions Workflow
 
-Already set up at `.github/workflows/release.yml`.
+The workflow file is already at `.github/workflows/release.yml`.
+
+### 5. The `.pkgmeta` File
+
+The `.pkgmeta` file in the repo root controls packaging behavior (what to include/exclude).
 
 ## How to Release
 
@@ -62,13 +66,42 @@ Already set up at `.github/workflows/release.yml`.
    - Create a GitHub Release
    - Upload to CurseForge
 
+## Adding WoWInterface and Wago (Optional)
+
+To also upload to WoWInterface and Wago, add more secrets and update the workflow:
+
+**Additional Secrets:**
+- `WOWI_API_TOKEN` — WoWInterface API token
+- `WOWI_ADDON_ID` — WoWInterface addon ID
+- `WAGO_API_TOKEN` — Wago API token
+- `WAGO_PROJECT_ID` — Wago project ID
+
+**Updated Workflow:**
+```yaml
+- name: Package and Release
+  uses: BigWigsMods/packager@v2
+  with:
+    args: >-
+      -p ${{ secrets.CURSEFORGE_PROJECT_ID }}
+      -w ${{ secrets.WOWI_ADDON_ID }}
+      -a ${{ secrets.WAGO_PROJECT_ID }}
+  env:
+    CF_API_KEY: ${{ secrets.CF_API_KEY }}
+    WOWI_API_TOKEN: ${{ secrets.WOWI_API_TOKEN }}
+    WAGO_API_TOKEN: ${{ secrets.WAGO_API_TOKEN }}
+    GITHUB_OAUTH: ${{ secrets.GITHUB_TOKEN }}
+```
+
 ## Game Version Detection
 
 The packager automatically detects game versions from your `.toc` file's `## Interface:` line:
 - `20505` → TBC Classic / Anniversary Edition
+- `11503` → Classic Era
+- `110002` → Retail
 
 ## Resources
 
 - [BigWigsMods/packager Documentation](https://github.com/BigWigsMods/packager)
 - [WoW Packager GitHub Action](https://github.com/marketplace/actions/wow-packager)
 - [CurseForge API Tokens](https://authors-old.curseforge.com/account/api-tokens)
+- [Blizzard Forum Guide](https://us.forums.blizzard.com/en/wow/t/creating-addon-releases-with-github-actions/613424)
