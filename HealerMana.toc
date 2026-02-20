@@ -1,0 +1,8 @@
+## Interface: 20505
+## Title: HealerMana
+## Notes: Tracks healer mana in group content with smart healer detection via talent inspection
+## Author: clearcmos
+## Version: 1.0.0
+## SavedVariables: HealerManaDB
+
+HealerMana.lua
