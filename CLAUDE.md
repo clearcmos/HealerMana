@@ -27,9 +27,9 @@ HealerMana is a WoW Classic Anniversary Edition addon that tracks healer mana in
 
 | Section | Lines (approx) | Description |
 |---------|----------------|-------------|
-| S1      | 1-42           | Header, DEFAULT_SETTINGS (incl. splitFrames, cdFrame* keys) |
+| S1      | 1-58           | Header, DEFAULT_SETTINGS (incl. splitFrames, cdFrame* keys, per-cooldown cd* toggles) |
 | S2      | 44-82          | Local performance caches |
-| S3      | 84-267         | Constants (classes, healing tabs, potions, raid cooldowns, canonical IDs, class/talent mappings) |
+| S3      | 84-267         | Constants (classes, healing tabs, potions, raid cooldowns, canonical IDs, COOLDOWN_SETTING_KEY, class/talent mappings) |
 | S4      | 269-330        | State variables (incl. cdFrame resize state) |
 | S5      | 332-470        | Utility functions (iteration, colors, measurement, status formatting) |
 | S6      | 472-655        | Healer detection engine (self-spec, inspect results, inspect queue) |
@@ -46,7 +46,7 @@ HealerMana is a WoW Classic Anniversary Edition addon that tracks healer mana in
 | S16     | 1357-1765      | Display update (PrepareHealerRowData, RenderHealerRows, RenderCooldownRows, RefreshHealerDisplay, RefreshCooldownDisplay, RefreshMergedDisplay, RefreshDisplay dispatcher) |
 | S17     | 1767-1860      | OnUpdate handler (all logic on BackgroundFrame; per-frame resize-hover only) |
 | S18     | 1862-2035      | Preview system (mock healers + mock cooldowns, both frames) |
-| S19     | 2037-2230      | Options GUI (native Settings API, splitFrames checkbox) |
+| S19     | 2037-2230      | Options GUI (native Settings API, splitFrames checkbox, per-cooldown toggles) |
 | S20     | 2232-2360      | Event handling (both frame positions restored) |
 | S21     | 2362-2448      | Slash commands + init (lock/reset apply to both frames) |
 
@@ -58,7 +58,7 @@ HealerMana is a WoW Classic Anniversary Edition addon that tracks healer mana in
 - Status indicators: Drinking, Innervate, Mana Tide Totem (with optional durations)
 - Potion cooldown tracking (2min timer from combat log)
 - Soulstone status indicator on dead healers (purple "SS"/"Soulstone")
-- Raid cooldown tracking with Ready/on-cooldown states: Innervate, Mana Tide, Bloodlust/Heroism, Power Infusion, Divine Intervention, Rebirth, Lay on Hands, Soulstone, Shield Wall
+- Raid cooldown tracking with Ready/on-cooldown states: Innervate, Mana Tide, Bloodlust/Heroism, Power Infusion, Rebirth, Lay on Hands, Soulstone, Shield Wall, Symbol of Hope (each individually toggleable)
 - Average mana across all healers
 - Sort healers by lowest mana or alphabetically
 - Optional chat warnings at configurable thresholds with cooldown

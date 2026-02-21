@@ -19,6 +19,7 @@ local DEFAULT_SETTINGS = {
     showInnervate = true,
     showManaTide = true,
     showSoulstone = true,
+    showRebirth = true,
     showSymbolOfHope = true,
     showPotionCooldown = true,
     showAverageMana = true,
@@ -39,11 +40,20 @@ local DEFAULT_SETTINGS = {
     cdFrameWidth = nil,
     cdFrameHeight = nil,
     statusIcons = true,
-    cooldownIcons = false,
+    cooldownDisplayMode = "icons_labels",  -- "text", "icons", "icons_labels"
     iconSize = 16,
     showRowHighlight = true,
     enableCdRequest = true,
     headerBackground = true,
+    cdInnervate = true,
+    cdManaTide = true,
+    cdBloodlustHeroism = true,
+    cdPowerInfusion = true,
+    cdSymbolOfHope = true,
+    cdShieldWall = true,
+    cdRebirth = true,
+    cdLayOnHands = true,
+    cdSoulstone = true,
 };
 
 --------------------------------------------------------------------------------
@@ -155,7 +165,6 @@ local MANA_TIDE_CAST_SPELL_ID = 16190;
 local BLOODLUST_SPELL_ID = 2825;
 local HEROISM_SPELL_ID = 32182;
 local POWER_INFUSION_SPELL_ID = 10060;
-local DIVINE_INTERVENTION_SPELL_ID = 19752;
 local SYMBOL_OF_HOPE_SPELL_ID = 32548;
 local SYMBOL_OF_HOPE_SPELL_NAME = GetSpellInfo(32548) or "Symbol of Hope";
 local SHIELD_WALL_SPELL_ID = 871;
@@ -171,12 +180,23 @@ local SOULSTONE_BUFF_IDS = {
 };
 local SOULSTONE_SPELL_NAME = GetSpellInfo(20707) or "Soulstone Resurrection";
 
+-- Rebirth spell IDs (all ranks)
+local REBIRTH_SPELL_IDS = {
+    [20484] = true,  -- Rank 1
+    [20739] = true,  -- Rank 2
+    [20742] = true,  -- Rank 3
+    [20747] = true,  -- Rank 4
+    [20748] = true,  -- Rank 5
+    [26994] = true,  -- Rank 6
+};
+
 -- Status icon textures for icon mode (keyed by status identifier)
 local STATUS_ICONS = {
     drinking     = select(3, GetSpellInfo(430)),      -- Drink
     innervate    = select(3, GetSpellInfo(29166)),     -- Innervate
     manaTide     = select(3, GetSpellInfo(16191)),     -- Mana Tide Totem
     soulstone    = select(3, GetSpellInfo(20707)),     -- Soulstone Resurrection
+    rebirth      = select(3, GetSpellInfo(20484)),     -- Rebirth
     symbolOfHope = select(3, GetSpellInfo(32548)) or 135982,  -- Symbol of Hope
     potion       = 134762,                              -- Generic potion (inv_potion_137)
 };
@@ -208,11 +228,6 @@ local RAID_COOLDOWN_SPELLS = {
         name = GetSpellInfo(POWER_INFUSION_SPELL_ID) or "Power Infusion",
         icon = select(3, GetSpellInfo(POWER_INFUSION_SPELL_ID)),
         duration = 180,
-    },
-    [DIVINE_INTERVENTION_SPELL_ID] = {
-        name = GetSpellInfo(DIVINE_INTERVENTION_SPELL_ID) or "Divine Intervention",
-        icon = select(3, GetSpellInfo(DIVINE_INTERVENTION_SPELL_ID)),
-        duration = 3600,
     },
     [SYMBOL_OF_HOPE_SPELL_ID] = {
         name = "Symbol of Hope",
@@ -273,10 +288,24 @@ local CANONICAL_SPELL_ID = {
     [20764] = 20707, [20765] = 20707, [27239] = 20707,  -- Soulstone
 };
 
+-- Per-cooldown toggle keys (canonical spell ID → db setting key)
+local COOLDOWN_SETTING_KEY = {
+    [INNERVATE_SPELL_ID]           = "cdInnervate",
+    [MANA_TIDE_CAST_SPELL_ID]     = "cdManaTide",
+    [BLOODLUST_SPELL_ID]          = "cdBloodlustHeroism",
+    [HEROISM_SPELL_ID]            = "cdBloodlustHeroism",
+    [POWER_INFUSION_SPELL_ID]     = "cdPowerInfusion",
+    [SYMBOL_OF_HOPE_SPELL_ID]     = "cdSymbolOfHope",
+    [SHIELD_WALL_SPELL_ID]        = "cdShieldWall",
+    [20484]                        = "cdRebirth",
+    [633]                          = "cdLayOnHands",
+    [20707]                        = "cdSoulstone",
+};
+
 -- Class-baseline raid cooldowns (every member of the class has these)
 local CLASS_COOLDOWN_SPELLS = {
     ["DRUID"] = { INNERVATE_SPELL_ID, 20484 },                   -- Innervate, Rebirth
-    ["PALADIN"] = { 633, DIVINE_INTERVENTION_SPELL_ID },          -- Lay on Hands, Divine Intervention
+    ["PALADIN"] = { 633 },                                        -- Lay on Hands
     ["WARLOCK"] = { 20707 },                                      -- Soulstone
     -- Shaman BL/Heroism handled separately (faction-dependent)
     -- Warrior Shield Wall handled via tank spec detection (TANK_COOLDOWN_SPELLS)
@@ -465,6 +494,8 @@ local function FormatStatusText(data)
     wipe(statusIconParts);
     local now = GetTime();
 
+    -- Priority order: Soulstone (dead) > Rebirth (dead) > Innervate > Symbol of Hope > Mana Tide > Drinking > Potion
+
     -- Soulstone shown on dead healers (manaPercent == -2)
     if db.showSoulstone and data.hasSoulstone and data.manaPercent == -2 then
         tinsert(statusLabelParts, format("|cff9482c9%s|r", "Soulstone"));
@@ -472,23 +503,18 @@ local function FormatStatusText(data)
         tinsert(statusIconParts, { icon = STATUS_ICONS.soulstone, duration = "" });
     end
 
-    if data.isDrinking and db.showDrinking then
-        tinsert(statusLabelParts, format("|cff55ccff%s|r", "Drinking"));
-        local dur = FormatDuration(data.drinkExpiry, now);
-        tinsert(statusDurParts, dur);
-        tinsert(statusIconParts, { icon = STATUS_ICONS.drinking, duration = dur });
+    -- Rebirth shown on dead healers who have a pending battle rez
+    if db.showRebirth and data.hasRebirth and data.manaPercent == -2 then
+        tinsert(statusLabelParts, format("|cffff7d0a%s|r", "Rebirth"));
+        tinsert(statusDurParts, "");
+        tinsert(statusIconParts, { icon = STATUS_ICONS.rebirth, duration = "" });
     end
+
     if data.hasInnervate and db.showInnervate then
         tinsert(statusLabelParts, format("|cffba55d3%s|r", "Innervate"));
         local dur = FormatDuration(data.innervateExpiry, now);
         tinsert(statusDurParts, dur);
         tinsert(statusIconParts, { icon = STATUS_ICONS.innervate, duration = dur });
-    end
-    if data.hasManaTide and db.showManaTide then
-        tinsert(statusLabelParts, format("|cff00c8ff%s|r", "Mana Tide"));
-        local dur = FormatDuration(data.manaTideExpiry, now);
-        tinsert(statusDurParts, dur);
-        tinsert(statusIconParts, { icon = STATUS_ICONS.manaTide, duration = dur });
     end
     if data.hasSymbolOfHope and db.showSymbolOfHope then
         tinsert(statusLabelParts, format("|cffffff80%s|r", "Symbol of Hope"));
@@ -496,11 +522,23 @@ local function FormatStatusText(data)
         tinsert(statusDurParts, dur);
         tinsert(statusIconParts, { icon = STATUS_ICONS.symbolOfHope, duration = dur });
     end
+    if data.hasManaTide and db.showManaTide then
+        tinsert(statusLabelParts, format("|cff00c8ff%s|r", "Mana Tide"));
+        local dur = FormatDuration(data.manaTideExpiry, now);
+        tinsert(statusDurParts, dur);
+        tinsert(statusIconParts, { icon = STATUS_ICONS.manaTide, duration = dur });
+    end
+    if data.isDrinking and db.showDrinking then
+        tinsert(statusLabelParts, format("|cff55ccff%s|r", "Drinking"));
+        local dur = FormatDuration(data.drinkExpiry, now);
+        tinsert(statusDurParts, dur);
+        tinsert(statusIconParts, { icon = STATUS_ICONS.drinking, duration = dur });
+    end
     if db.showPotionCooldown and data.potionExpiry and data.potionExpiry > now
-            and not (data.isDrinking and db.showDrinking)
             and not (data.hasInnervate and db.showInnervate)
+            and not (data.hasSymbolOfHope and db.showSymbolOfHope)
             and not (data.hasManaTide and db.showManaTide)
-            and not (data.hasSymbolOfHope and db.showSymbolOfHope) then
+            and not (data.isDrinking and db.showDrinking) then
         local remaining = floor(data.potionExpiry - now);
         local minutes = floor(remaining / 60);
         local seconds = remaining % 60;
@@ -558,6 +596,7 @@ local function SeedTankCooldowns(guid, data)
                     icon = cdInfo.icon,
                     spellName = cdInfo.name,
                     expiryTime = 0,
+                    lastCastTime = 0,
                 };
             end
         end
@@ -829,6 +868,7 @@ ScanGroupComposition = function()
                     hasInnervate = false,
                     hasManaTide = false,
                     hasSoulstone = false,
+                    hasRebirth = false,
                     hasSymbolOfHope = false,
                     symbolOfHopeExpiry = 0,
                     potionExpiry = 0,
@@ -1008,25 +1048,29 @@ local function GroupCooldownsBySpell()
 
     for _, entry in pairs(raidCooldowns) do
         local sid = entry.spellId;
-        if not spellGroupCache[sid] then
-            spellGroupCache[sid] = {
-                spellId = sid,
-                spellName = entry.spellName,
-                icon = entry.icon,
-                casters = {},
-            };
+        local settingKey = COOLDOWN_SETTING_KEY[sid];
+        if not (settingKey and not db[settingKey]) then
+            if not spellGroupCache[sid] then
+                spellGroupCache[sid] = {
+                    spellId = sid,
+                    spellName = entry.spellName,
+                    icon = entry.icon,
+                    casters = {},
+                };
+            end
+            local guid = entry.sourceGUID;
+            if deadCache[guid] == nil then
+                deadCache[guid] = IsCasterDead(guid);
+            end
+            tinsert(spellGroupCache[sid].casters, {
+                guid = guid,
+                name = entry.name,
+                classFile = entry.classFile,
+                expiryTime = entry.expiryTime,
+                lastCastTime = entry.lastCastTime or 0,
+                isDead = deadCache[guid],
+            });
         end
-        local guid = entry.sourceGUID;
-        if deadCache[guid] == nil then
-            deadCache[guid] = IsCasterDead(guid);
-        end
-        tinsert(spellGroupCache[sid].casters, {
-            guid = guid,
-            name = entry.name,
-            classFile = entry.classFile,
-            expiryTime = entry.expiryTime,
-            isDead = deadCache[guid],
-        });
     end
 
     local now = GetTime();
@@ -1065,6 +1109,8 @@ local function UpdateManaValues()
             elseif not UnitIsConnected(data.unit) then
                 data.manaPercent = -1;
             else
+                -- No longer dead — clear pending rebirth
+                if data.hasRebirth then data.hasRebirth = false; end
                 local manaMax = UnitPowerMax(data.unit, POWER_TYPE_MANA);
                 if manaMax > 0 then
                     local mana = UnitPower(data.unit, POWER_TYPE_MANA);
@@ -1185,6 +1231,7 @@ local function ProcessCombatLog()
                     icon = cdInfo.icon,
                     spellName = cdInfo.name,
                     expiryTime = GetTime() + cdInfo.duration,
+                    lastCastTime = GetTime(),
                 };
             end
         elseif subevent == "SPELL_AURA_APPLIED" and SOULSTONE_BUFF_IDS[spellId] then
@@ -1201,6 +1248,7 @@ local function ProcessCombatLog()
                     icon = cdInfo.icon,
                     spellName = cdInfo.name,
                     expiryTime = GetTime() + cdInfo.duration,
+                    lastCastTime = GetTime(),
                 };
             end
             -- Mark the healer who received the soulstone
@@ -1219,6 +1267,16 @@ local function ProcessCombatLog()
             local data = healers[destGUID];
             if data then
                 data.hasSoulstone = false;
+            end
+        end
+    end
+
+    -- Mark healer as having pending Rebirth (cast on them while dead)
+    if subevent == "SPELL_CAST_SUCCESS" and REBIRTH_SPELL_IDS[spellId] then
+        if destGUID then
+            local data = healers[destGUID];
+            if data and data.isHealer then
+                data.hasRebirth = true;
             end
         end
     end
@@ -1665,8 +1723,8 @@ local CD_REQUEST_CONFIG = {
     [BLOODLUST_SPELL_ID]        = { type = "cast" },
     [HEROISM_SPELL_ID]          = { type = "cast" },
     [SHIELD_WALL_SPELL_ID]      = { type = "cast" },
-    [INNERVATE_SPELL_ID]        = { type = "target", filter = "low_mana",  threshold = 30 },
-    [633]                       = { type = "target", filter = "low_health", threshold = 20 },  -- Lay on Hands
+    [INNERVATE_SPELL_ID]        = { type = "target", filter = "low_mana",  threshold = 50 },
+    [633]                       = { type = "target", filter = "low_health", threshold = 30 },  -- Lay on Hands
     [POWER_INFUSION_SPELL_ID]   = { type = "target", filter = "dps_mana" },
     [20484]                     = { type = "target", filter = "dead" },                         -- Rebirth
     [20707]                     = { type = "target", filter = "alive_no_soulstone" },             -- Soulstone
@@ -1701,12 +1759,12 @@ local function ScanGroupTargets(filter, threshold, casterGUID)
                 if filter == "low_mana" then
                     if data.manaPercent >= 0 then
                         tinsert(results, { name = data.name, guid = guid, classFile = data.classFile,
-                            info = format("%d%% mana", data.manaPercent) });
+                            info = format("%d%% mana", data.manaPercent), sortValue = data.manaPercent });
                     end
                 elseif filter == "low_health" then
                     if data.manaPercent >= 0 then
                         tinsert(results, { name = data.name, guid = guid, classFile = data.classFile,
-                            info = format("%d%% health", data.manaPercent) });
+                            info = format("%d%% health", data.manaPercent), sortValue = data.manaPercent });
                     end
                 elseif filter == "dead" then
                     if data.manaPercent == -2 then
@@ -1742,7 +1800,7 @@ local function ScanGroupTargets(filter, threshold, casterGUID)
                             local pct = floor(UnitPower(unit) / maxPower * 100);
                             if pct <= threshold then
                                 tinsert(results, { name = name, guid = guid, classFile = classFile,
-                                    info = format("%d%% mana", pct) });
+                                    info = format("%d%% mana", pct), sortValue = pct });
                             end
                         end
                     end
@@ -1753,7 +1811,7 @@ local function ScanGroupTargets(filter, threshold, casterGUID)
                             local pct = floor(UnitHealth(unit) / maxHP * 100);
                             if pct <= threshold then
                                 tinsert(results, { name = name, guid = guid, classFile = classFile,
-                                    info = format("%d%% health", pct) });
+                                    info = format("%d%% health", pct), sortValue = pct });
                             end
                         end
                     end
@@ -1784,7 +1842,11 @@ local function ScanGroupTargets(filter, threshold, casterGUID)
         end
     end
 
-    sort(results, function(a, b) return a.name < b.name; end);
+    if filter == "low_mana" or filter == "low_health" then
+        sort(results, function(a, b) return (a.sortValue or 0) < (b.sortValue or 0); end);
+    else
+        sort(results, function(a, b) return a.name < b.name; end);
+    end
     return results;
 end
 
@@ -2075,6 +2137,37 @@ ShowTargetSubmenu = function(casterName, casterGUID, spellId, spellName, spellIc
     contextMenuVisible = true;
 end
 
+-- Pick the best ready caster: prefer longest time since last cast, random if all uncast
+local function PickBestCaster(group)
+    local now = GetTime();
+    local ready = {};
+    for _, c in ipairs(group.casters) do
+        if not c.isDead and c.expiryTime <= now then
+            tinsert(ready, c);
+        end
+    end
+    if #ready == 0 then return nil; end
+
+    -- Check if all have lastCastTime == 0 (never cast)
+    local allUncast = true;
+    for _, c in ipairs(ready) do
+        if c.lastCastTime > 0 then allUncast = false; break; end
+    end
+
+    if allUncast then
+        return ready[math.random(#ready)];
+    end
+
+    -- Pick the one with the lowest lastCastTime (longest since last cast)
+    local best = ready[1];
+    for i = 2, #ready do
+        if ready[i].lastCastTime < best.lastCastTime then
+            best = ready[i];
+        end
+    end
+    return best;
+end
+
 -- Level 1 menu: list casters of a spell group with individual state
 ShowCdRowRequestMenu = function(cdRow)
     local spellId = cdRow.spellId;
@@ -2082,14 +2175,21 @@ ShowCdRowRequestMenu = function(cdRow)
     if not spellId or not group then return; end
 
     -- Toggle off if clicking same spell
-    if contextMenuVisible and contextMenuFrame and contextMenuFrame.targetSpellId == spellId
-       and not contextMenuFrame.targetGUID then
+    if contextMenuVisible and contextMenuFrame and contextMenuFrame.targetSpellId == spellId then
         HideContextMenu();
         return;
     end
 
     local config = CD_REQUEST_CONFIG[spellId];
     if not config then return; end
+
+    -- For targeted spells, skip caster menu — go straight to target selection
+    if config.type == "target" then
+        local caster = PickBestCaster(group);
+        if not caster then return; end
+        ShowTargetSubmenu(caster.name, caster.guid, spellId, group.spellName, group.icon);
+        return;
+    end
 
     if not contextMenuFrame then
         contextMenuFrame = CreateContextMenu();
@@ -2458,17 +2558,20 @@ local function RenderCooldownRows(targetFrame, yOffset, totalWidth)
     if #spellGroups == 0 then return yOffset, totalWidth; end
 
     local now = GetTime();
-    local useIcons = db.cooldownIcons;
+    local cdMode = db.cooldownDisplayMode or "icons_labels";
+    local useIcons = (cdMode == "icons" or cdMode == "icons_labels");
+    local useIconLabels = (cdMode == "icons_labels");
     local cdIconSize = db.iconSize;
     local rowHeight = max(db.fontSize + 4, useIcons and (cdIconSize + 2) or 0, 16);
 
     -- Measure column widths (no player name column — just spell + timer)
     local cdSpellMax = 0;
+    local cdLabelMax = 0;
     local cdFontSize = db.fontSize;
     local cdTimerMax = MeasureText("Ready", cdFontSize);
 
     for _, group in ipairs(spellGroups) do
-        if not useIcons then
+        if not useIcons or useIconLabels then
             local sw = MeasureText(group.spellName, cdFontSize);
             if sw > cdSpellMax then cdSpellMax = sw; end
         end
@@ -2479,12 +2582,17 @@ local function RenderCooldownRows(targetFrame, yOffset, totalWidth)
     cdTimerMax = cdTimerMax + cdHalfPad;
 
     if useIcons then
-        cdSpellMax = cdIconSize + cdPad;
+        if useIconLabels then
+            cdLabelMax = cdSpellMax + cdPad;
+            cdSpellMax = cdIconSize + cdPad;
+        else
+            cdSpellMax = cdIconSize + cdPad;
+        end
     else
         cdSpellMax = cdSpellMax + cdPad;
     end
 
-    local cdContentWidth = cdSpellMax + COL_GAP + cdTimerMax;
+    local cdContentWidth = cdSpellMax + cdLabelMax + COL_GAP + cdTimerMax;
     local cdTotalWidth = LEFT_MARGIN + cdContentWidth + RIGHT_MARGIN;
     if cdTotalWidth > totalWidth then totalWidth = cdTotalWidth; end
 
@@ -2511,21 +2619,35 @@ local function RenderCooldownRows(targetFrame, yOffset, totalWidth)
         cdRow.nameText:SetFont(FONT_PATH, cdFontSize, "OUTLINE");
 
         if useIcons then
-            -- Icon mode: show spell icon, hide spell text
-            cdRow.nameText:Hide();
-            cdRow.spellText:Hide();
+            -- Icon mode: show spell icon
             cdRow.spellIcon:ClearAllPoints();
             cdRow.spellIcon:SetSize(cdIconSize, cdIconSize);
             cdRow.spellIcon:SetTexture(group.icon);
             cdRow.spellIcon:SetPoint("LEFT", 0, 0);
             cdRow.spellIcon:Show();
 
-            cdRow.timerText:ClearAllPoints();
-            cdRow.timerText:SetPoint("LEFT", cdRow.spellIcon, "RIGHT", COL_GAP, 0);
+            if useIconLabels then
+                -- Icon + label mode: icon, spell name, then timer
+                cdRow.nameText:SetWidth(cdLabelMax);
+                cdRow.nameText:SetText(group.spellName);
+                cdRow.nameText:SetTextColor(1, 1, 1);
+                cdRow.nameText:ClearAllPoints();
+                cdRow.nameText:SetPoint("LEFT", cdRow.spellIcon, "RIGHT", COL_GAP, 0);
+                cdRow.nameText:Show();
+                cdRow.timerText:ClearAllPoints();
+                cdRow.timerText:SetPoint("LEFT", cdRow.nameText, "RIGHT", COL_GAP, 0);
+            else
+                cdRow.nameText:Hide();
+                cdRow.timerText:ClearAllPoints();
+                cdRow.timerText:SetPoint("LEFT", cdRow.spellIcon, "RIGHT", COL_GAP, 0);
+            end
+            cdRow.spellText:Hide();
         else
             -- Text mode: show spell name in nameText, hide icon
             cdRow.spellIcon:Hide();
             cdRow.spellText:Hide();
+            cdRow.nameText:ClearAllPoints();
+            cdRow.nameText:SetPoint("LEFT", 0, 0);
             cdRow.nameText:SetWidth(cdSpellMax);
             cdRow.nameText:SetText(group.spellName);
             cdRow.nameText:SetTextColor(1, 1, 1);
@@ -2685,7 +2807,8 @@ local function RefreshCooldownDisplay()
         return;
     end
 
-    local rowHeight = max(db.fontSize + 4, db.cooldownIcons and (db.iconSize + 2) or 0, 16);
+    local cdHasIcons = (db.cooldownDisplayMode ~= "text");
+    local rowHeight = max(db.fontSize + 4, cdHasIcons and (db.iconSize + 2) or 0, 16);
     local yOffset = -TOP_PADDING;
     local totalWidth = 120;
 
@@ -2738,7 +2861,7 @@ local function RefreshMergedDisplay(sortedHealers)
     HideAllRows();
 
     local iconH = 0;
-    if db.statusIcons or db.cooldownIcons then iconH = db.iconSize + 2; end
+    if db.statusIcons or db.cooldownDisplayMode ~= "text" then iconH = db.iconSize + 2; end
     local rowHeight = max(db.fontSize + 4, iconH, 16);
     local maxNameWidth, maxManaWidth, maxStatusLabelWidth, maxStatusDurWidth = PrepareHealerRowData(sortedHealers);
 
@@ -2981,6 +3104,7 @@ local PREVIEW_DATA = {
     { name = "Palaheals", classFile = "PALADIN", baseMana = 18, hasInnervate = true, driftSeed = 0.7 },
     { name = "Tidecaller", classFile = "SHAMAN", baseMana = 64, hasManaTide = true, driftSeed = 1.2 },
     { name = "Soulstoned", classFile = "PALADIN", hasSoulstone = true, driftSeed = 0 },
+    { name = "Rebirthed", classFile = "PRIEST", hasRebirth = true, driftSeed = 0 },
 };
 
 StartPreview = function()
@@ -3011,6 +3135,7 @@ StartPreview = function()
             hasInnervate = td.hasInnervate or false,
             hasManaTide = td.hasManaTide or false,
             hasSoulstone = td.hasSoulstone or false,
+            hasRebirth = td.hasRebirth or false,
             hasSymbolOfHope = td.hasSymbolOfHope or false,
             drinkExpiry = td.isDrinking and (GetTime() + 18) or 0,
             innervateExpiry = td.hasInnervate and (GetTime() + 12) or 0,
@@ -3221,6 +3346,10 @@ local healerManaCategoryID;
 local SORT_MAP = { [1] = "mana", [2] = "name" };
 local SORT_REVERSE = { mana = 1, name = 2 };
 
+-- Cooldown display mode mapping
+local CD_MODE_MAP = { [1] = "text", [2] = "icons", [3] = "icons_labels" };
+local CD_MODE_REVERSE = { text = 1, icons = 2, icons_labels = 3 };
+
 local function RegisterSettings()
     local category, layout = Settings.RegisterVerticalLayoutCategory("HealerMana");
 
@@ -3297,9 +3426,9 @@ local function RegisterSettings()
         "How to order healers in the display.");
 
     -------------------------
-    -- Section: Status Indicators
+    -- Section: Healer Status Indicators
     -------------------------
-    layout:AddInitializer(CreateSettingsListSectionHeaderInitializer("Status Indicators"));
+    layout:AddInitializer(CreateSettingsListSectionHeaderInitializer("Healer Status Indicators"));
 
     AddCheckbox("showDrinking", "Drinking",
         "Indicate when a healer is drinking to restore mana.");
@@ -3310,17 +3439,17 @@ local function RegisterSettings()
     AddCheckbox("showManaTide", "Mana Tide",
         "Indicate when a healer is affected by Mana Tide Totem.");
 
+    AddCheckbox("showPotionCooldown", "Potion Cooldowns",
+        "Display mana potion cooldown timers.");
+
+    AddCheckbox("showRebirth", "Rebirth",
+        "Indicate pending Rebirth on dead healers who have been battle-rezzed.");
+
     AddCheckbox("showSoulstone", "Soulstone",
         "Indicate Soulstone on dead healers who have the buff.");
 
     AddCheckbox("showSymbolOfHope", "Symbol of Hope",
         "Indicate when a healer is receiving mana from Symbol of Hope.");
-
-    AddCheckbox("showPotionCooldown", "Potion Cooldowns",
-        "Display mana potion cooldown timers.");
-
-    AddCheckbox("showRaidCooldowns", "Cooldowns",
-        "Track group cooldowns (Innervate, Mana Tide, Bloodlust, etc.) with Ready/on-cooldown timers.");
 
     AddCheckbox("showStatusDuration", "Buff Durations",
         "Show remaining seconds on active buffs like Innervate, Mana Tide, and Drinking.");
@@ -3328,14 +3457,62 @@ local function RegisterSettings()
     AddCheckbox("statusIcons", "Status Icons",
         "Show spell icons instead of text labels for healer status indicators (Drinking, Innervate, etc.).");
 
-    AddCheckbox("cooldownIcons", "Cooldown Icons",
-        "Display spell icons instead of spell names in the cooldowns section.");
-
     AddCheckbox("showRowHighlight", "Row Hover Highlight",
         "Highlight rows on mouse hover for visual feedback.");
 
     AddCheckbox("enableCdRequest", "Click-to-Request Cooldowns",
         "Click a healer or cooldown row to whisper a caster requesting a cooldown.");
+
+    -------------------------
+    -- Section: Cooldown Tracking
+    -------------------------
+    layout:AddInitializer(CreateSettingsListSectionHeaderInitializer("Cooldown Tracking"));
+
+    AddCheckbox("showRaidCooldowns", "Enable Cooldown Tracking",
+        "Track group cooldowns with Ready/on-cooldown timers in a dedicated section.");
+
+    AddCheckbox("cdBloodlustHeroism", "Bloodlust / Heroism",
+        "Track Bloodlust and Heroism cooldowns in the cooldown section.");
+
+AddCheckbox("cdInnervate", "Innervate",
+        "Track Innervate cooldowns in the cooldown section.");
+
+    AddCheckbox("cdLayOnHands", "Lay on Hands",
+        "Track Lay on Hands cooldowns in the cooldown section.");
+
+    AddCheckbox("cdManaTide", "Mana Tide",
+        "Track Mana Tide Totem cooldowns in the cooldown section.");
+
+    AddCheckbox("cdPowerInfusion", "Power Infusion",
+        "Track Power Infusion cooldowns in the cooldown section.");
+
+    AddCheckbox("cdRebirth", "Rebirth",
+        "Track Rebirth cooldowns in the cooldown section.");
+
+    AddCheckbox("cdShieldWall", "Shield Wall",
+        "Track Shield Wall cooldowns in the cooldown section.");
+
+    AddCheckbox("cdSoulstone", "Soulstone",
+        "Track Soulstone cooldowns in the cooldown section.");
+
+    AddCheckbox("cdSymbolOfHope", "Symbol of Hope",
+        "Track Symbol of Hope cooldowns in the cooldown section.");
+
+    -- Cooldown display mode dropdown
+    local cdModeSetting = Settings.RegisterProxySetting(category,
+        "HEALERMANA_CD_DISPLAY_MODE", Settings.VarType.Number, "Cooldown Display Mode",
+        CD_MODE_REVERSE[DEFAULT_SETTINGS.cooldownDisplayMode] or 3,
+        function() return CD_MODE_REVERSE[db.cooldownDisplayMode] or 3; end,
+        function(value) db.cooldownDisplayMode = CD_MODE_MAP[value] or "icons_labels"; end);
+    local function GetCdModeOptions()
+        local container = Settings.CreateControlTextContainer();
+        container:Add(1, "Text Only");
+        container:Add(2, "Icons Only");
+        container:Add(3, "Icons + Labels");
+        return container:GetData();
+    end
+    Settings.CreateDropdown(category, cdModeSetting, GetCdModeOptions,
+        "How cooldowns are displayed: text names, icons, or icons with labels.");
 
     -------------------------
     -- Section: Appearance
@@ -3447,6 +3624,19 @@ local function OnEvent(self, event, ...)
         db.shortenedStatus = nil;
         db.showSolo = nil;
         db.sendWarningsSolo = nil;
+
+        -- Migrate cooldownIcons/cooldownIconLabels → cooldownDisplayMode
+        if db.cooldownIcons ~= nil then
+            if not db.cooldownIcons then
+                db.cooldownDisplayMode = "text";
+            elseif db.cooldownIconLabels then
+                db.cooldownDisplayMode = "icons_labels";
+            else
+                db.cooldownDisplayMode = "icons";
+            end
+            db.cooldownIcons = nil;
+            db.cooldownIconLabels = nil;
+        end
 
         -- Register native settings panel
         RegisterSettings();
