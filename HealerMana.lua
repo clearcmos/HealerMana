@@ -1993,7 +1993,8 @@ ShowCooldownRequestMenu = function(rowFrame)
     local cursorX, cursorY = GetCursorPosition();
     local menuScale = contextMenuFrame:GetEffectiveScale();
     contextMenuFrame:ClearAllPoints();
-    contextMenuFrame:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT", cursorX / menuScale + 4, cursorY / menuScale + 4);
+    local yAdj = (MENU_PADDING + MENU_ITEM_HEIGHT * 0.5) / menuScale;
+    contextMenuFrame:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT", cursorX / menuScale, cursorY / menuScale + yAdj);
     contextMenuFrame.targetGUID = healerGUID;
     contextMenuFrame.targetSpellId = nil;
     contextMenuFrame:Show();
@@ -2002,7 +2003,7 @@ ShowCooldownRequestMenu = function(rowFrame)
 end
 
 -- Show target selection submenu for a specific caster's targeted spell
-ShowTargetSubmenu = function(casterName, casterGUID, spellId, spellName, spellIcon, anchorX, anchorY)
+ShowTargetSubmenu = function(casterName, casterGUID, spellId, spellName, spellIcon)
     local config = CD_REQUEST_CONFIG[spellId];
     if not config or config.type ~= "target" then return; end
 
@@ -2061,10 +2062,12 @@ ShowTargetSubmenu = function(casterName, casterGUID, spellId, spellName, spellIc
     local menuHeight = MENU_PADDING * 2 + #targets * MENU_ITEM_HEIGHT;
     contextMenuFrame:SetSize(menuWidth, menuHeight);
 
-    -- Anchor at the provided position
+    -- Anchor at cursor, shifted up so cursor lands on first item
     local menuScale = contextMenuFrame:GetEffectiveScale();
     contextMenuFrame:ClearAllPoints();
-    contextMenuFrame:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT", anchorX / menuScale, anchorY / menuScale);
+    local anchorX, anchorY = GetCursorPosition();
+    local yAdj = MENU_PADDING + MENU_ITEM_HEIGHT * 0.5;
+    contextMenuFrame:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT", anchorX / menuScale, anchorY / menuScale + yAdj);
     contextMenuFrame.targetGUID = casterGUID;
     contextMenuFrame.targetSpellId = spellId;
     contextMenuFrame:Show();
@@ -2099,6 +2102,18 @@ ShowCdRowRequestMenu = function(cdRow)
 
     local now = GetTime();
     local maxWidth = 0;
+
+    -- Re-sort casters: alive+ready first, then alive+shortest CD, then dead
+    sort(group.casters, function(a, b)
+        if a.isDead ~= b.isDead then return not a.isDead; end
+        local aReady = (not a.isDead and a.expiryTime <= now);
+        local bReady = (not b.isDead and b.expiryTime <= now);
+        if aReady ~= bReady then return aReady; end
+        if not a.isDead and not b.isDead then
+            return a.expiryTime < b.expiryTime;
+        end
+        return a.name < b.name;
+    end);
 
     for i, c in ipairs(group.casters) do
         local item = contextMenuFrame.items[i];
@@ -2141,8 +2156,7 @@ ShowCdRowRequestMenu = function(cdRow)
                 -- Level 2: open target submenu
                 item:SetScript("OnMouseUp", function(self, button)
                     if button ~= "LeftButton" then return; end
-                    local cx, cy = GetCursorPosition();
-                    ShowTargetSubmenu(self.casterName, c.guid, spellId, group.spellName, group.icon, cx + 4, cy + 4);
+                    ShowTargetSubmenu(self.casterName, c.guid, spellId, group.spellName, group.icon);
                 end);
             elseif config.type == "cast" then
                 item:SetScript("OnMouseUp", function(self, button)
@@ -2195,7 +2209,8 @@ ShowCdRowRequestMenu = function(cdRow)
     local cursorX, cursorY = GetCursorPosition();
     local menuScale = contextMenuFrame:GetEffectiveScale();
     contextMenuFrame:ClearAllPoints();
-    contextMenuFrame:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT", cursorX / menuScale + 4, cursorY / menuScale + 4);
+    local yAdj = (MENU_PADDING + MENU_ITEM_HEIGHT * 0.5) / menuScale;
+    contextMenuFrame:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT", cursorX / menuScale, cursorY / menuScale + yAdj);
     contextMenuFrame.targetGUID = nil;  -- spell-level, not caster-level
     contextMenuFrame.targetSpellId = spellId;
     contextMenuFrame:Show();
