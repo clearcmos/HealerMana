@@ -2227,32 +2227,32 @@ local function RegisterSettings()
     -------------------------
     layout:AddInitializer(CreateSettingsListSectionHeaderInitializer("Status Indicators"));
 
-    AddCheckbox("showDrinking", "Show Drinking Status",
-        "Show when a healer is drinking to restore mana.");
+    AddCheckbox("showDrinking", "Drinking",
+        "Indicate when a healer is drinking to restore mana.");
 
-    AddCheckbox("showInnervate", "Show Innervate",
-        "Show when a healer has Innervate active.");
+    AddCheckbox("showInnervate", "Innervate",
+        "Indicate when a healer has Innervate active.");
 
-    AddCheckbox("showManaTide", "Show Mana Tide",
-        "Show when a healer is affected by Mana Tide Totem.");
+    AddCheckbox("showManaTide", "Mana Tide",
+        "Indicate when a healer is affected by Mana Tide Totem.");
 
-    AddCheckbox("showSoulstone", "Show Soulstone Status",
-        "Show Soulstone indicator on dead healers who have a soulstone buff.");
+    AddCheckbox("showSoulstone", "Soulstone",
+        "Indicate Soulstone on dead healers who have the buff.");
 
-    AddCheckbox("showSymbolOfHope", "Show Symbol of Hope",
-        "Show when a healer is receiving mana from Symbol of Hope.");
+    AddCheckbox("showSymbolOfHope", "Symbol of Hope",
+        "Indicate when a healer is receiving mana from Symbol of Hope.");
 
-    AddCheckbox("showPotionCooldown", "Show Potion Cooldowns",
-        "Show mana potion cooldown timers.");
+    AddCheckbox("showPotionCooldown", "Potion Cooldowns",
+        "Display mana potion cooldown timers.");
 
-    AddCheckbox("showRaidCooldowns", "Show Raid Cooldowns",
-        "Show raid cooldown tracker below healer mana bars.");
+    AddCheckbox("showRaidCooldowns", "Raid Cooldowns",
+        "Display raid cooldown tracker below healer mana bars.");
 
-    AddCheckbox("shortenedStatus", "Shortened Status Labels",
+    AddCheckbox("shortenedStatus", "Shortened Labels",
         "Use abbreviated labels (e.g. 'Inn' instead of 'Innervate').");
 
-    AddCheckbox("showStatusDuration", "Show Buff Durations",
-        "Show remaining duration on status indicators.");
+    AddCheckbox("showStatusDuration", "Buff Durations",
+        "Display remaining duration on status indicators.");
 
     -------------------------
     -- Section: Appearance
