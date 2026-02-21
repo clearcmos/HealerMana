@@ -18,16 +18,16 @@ local DEFAULT_SETTINGS = {
     showDrinking = true,
     showInnervate = true,
     showManaTide = true,
+    showSoulstone = true,
+    showSymbolOfHope = true,
     showPotionCooldown = true,
     showAverageMana = true,
     shortenedStatus = true,
     showStatusDuration = false,
     showSolo = false,
-    optionsBgOpacity = 0.9,
     sendWarnings = false,
-    warningThresholdHigh = 30,
-    warningThresholdMed = 20,
-    warningThresholdLow = 10,
+    sendWarningsSolo = false,
+    warningThreshold = 10,
     warningCooldown = 30,
     colorThresholdGreen = 75,
     colorThresholdYellow = 50,
@@ -150,6 +150,19 @@ local BLOODLUST_SPELL_ID = 2825;
 local HEROISM_SPELL_ID = 32182;
 local POWER_INFUSION_SPELL_ID = 10060;
 local DIVINE_INTERVENTION_SPELL_ID = 19752;
+local SYMBOL_OF_HOPE_SPELL_ID = 32548;
+local SYMBOL_OF_HOPE_SPELL_NAME = GetSpellInfo(32548) or "Symbol of Hope";
+
+-- Soulstone Resurrection buff IDs (applied to target when warlock uses soulstone)
+local SOULSTONE_BUFF_IDS = {
+    [20707] = true,    -- Soulstone Resurrection (Minor)
+    [20762] = true,    -- Soulstone Resurrection (Lesser)
+    [20763] = true,    -- Soulstone Resurrection (Greater)
+    [20764] = true,    -- Soulstone Resurrection (Major)
+    [20765] = true,    -- Soulstone Resurrection (Master)
+    [27239] = true,    -- Soulstone Resurrection (TBC)
+};
+local SOULSTONE_SPELL_NAME = GetSpellInfo(20707) or "Soulstone Resurrection";
 
 -- Raid-wide cooldown spells tracked at the bottom of the display
 -- Multi-rank spells share a single info table referenced by all rank IDs
@@ -184,6 +197,11 @@ local RAID_COOLDOWN_SPELLS = {
         icon = select(3, GetSpellInfo(DIVINE_INTERVENTION_SPELL_ID)),
         duration = 3600,
     },
+    [SYMBOL_OF_HOPE_SPELL_ID] = {
+        name = "Symbol of Hope",
+        icon = select(3, GetSpellInfo(SYMBOL_OF_HOPE_SPELL_ID)),
+        duration = 300,
+    },
 };
 
 -- Rebirth (6 ranks, all same CD) — shared info referenced by each rank ID
@@ -210,24 +228,41 @@ RAID_COOLDOWN_SPELLS[2800]  = layOnHandsInfo;  -- Rank 2
 RAID_COOLDOWN_SPELLS[10310] = layOnHandsInfo;  -- Rank 3
 RAID_COOLDOWN_SPELLS[27154] = layOnHandsInfo;  -- Rank 4
 
+-- Soulstone Resurrection (6 ranks, tracked via SPELL_AURA_APPLIED on target)
+-- When the buff is applied, the warlock's Create Soulstone is on CD for 30 min
+local soulstoneInfo = {
+    name = "Soulstone",
+    icon = select(3, GetSpellInfo(20707)),
+    duration = 1800,
+};
+RAID_COOLDOWN_SPELLS[20707] = soulstoneInfo;  -- Minor
+RAID_COOLDOWN_SPELLS[20762] = soulstoneInfo;  -- Lesser
+RAID_COOLDOWN_SPELLS[20763] = soulstoneInfo;  -- Greater
+RAID_COOLDOWN_SPELLS[20764] = soulstoneInfo;  -- Major
+RAID_COOLDOWN_SPELLS[20765] = soulstoneInfo;  -- Master
+RAID_COOLDOWN_SPELLS[27239] = soulstoneInfo;  -- TBC
+
 -- Canonical spell ID for multi-rank spells (any rank → rank 1 for consistent keys)
 local CANONICAL_SPELL_ID = {
     [20484] = 20484, [20739] = 20484, [20742] = 20484,
     [20747] = 20484, [20748] = 20484, [26994] = 20484,  -- Rebirth
     [633] = 633, [2800] = 633, [10310] = 633, [27154] = 633,  -- Lay on Hands
+    [20707] = 20707, [20762] = 20707, [20763] = 20707,
+    [20764] = 20707, [20765] = 20707, [27239] = 20707,  -- Soulstone
 };
 
 -- Class-baseline raid cooldowns (every member of the class has these)
 local CLASS_COOLDOWN_SPELLS = {
     ["DRUID"] = { INNERVATE_SPELL_ID, 20484 },                   -- Innervate, Rebirth
     ["PALADIN"] = { 633, DIVINE_INTERVENTION_SPELL_ID },          -- Lay on Hands, Divine Intervention
+    ["WARLOCK"] = { 20707 },                                      -- Soulstone
     -- Shaman BL/Heroism handled separately (faction-dependent)
 };
 
 -- Talent-based cooldowns to check for player via IsSpellKnown
 local TALENT_COOLDOWN_SPELLS = {
     ["SHAMAN"] = { MANA_TIDE_CAST_SPELL_ID },
-    ["PRIEST"] = { POWER_INFUSION_SPELL_ID },
+    ["PRIEST"] = { POWER_INFUSION_SPELL_ID, SYMBOL_OF_HOPE_SPELL_ID },
 };
 
 --------------------------------------------------------------------------------
@@ -268,7 +303,7 @@ local savedRaidCooldowns = nil;
 
 -- Warning state
 local lastWarningTime = 0;
-local warningTriggered = { high = false, med = false, low = false };
+local warningTriggered = false;
 
 -- Update throttling
 local updateElapsed = 0;
@@ -283,6 +318,8 @@ local savedHealers = nil;
 -- Forward declarations
 local RefreshDisplay;
 local ScanGroupComposition;
+local StartPreview;
+local StopPreview;
 
 --------------------------------------------------------------------------------
 -- Utility Functions
@@ -358,6 +395,13 @@ local function FormatStatusText(data)
     local short = db.shortenedStatus;
     local now = GetTime();
 
+    -- Soulstone shown on dead healers (manaPercent == -2)
+    if db.showSoulstone and data.hasSoulstone and data.manaPercent == -2 then
+        local label = short and "SS" or "Soulstone";
+        tinsert(statusLabelParts, format("|cff9482c9%s|r", label));
+        tinsert(statusDurParts, "");
+    end
+
     if data.isDrinking and db.showDrinking then
         local label = short and "Drink" or "Drinking";
         tinsert(statusLabelParts, format("|cff55ccff%s|r", label));
@@ -373,7 +417,16 @@ local function FormatStatusText(data)
         tinsert(statusLabelParts, format("|cff00c8ff%s|r", label));
         tinsert(statusDurParts, FormatDuration(data.manaTideExpiry, now));
     end
-    if db.showPotionCooldown and data.potionExpiry and data.potionExpiry > now then
+    if data.hasSymbolOfHope and db.showSymbolOfHope then
+        local label = short and "SoH" or "Symbol of Hope";
+        tinsert(statusLabelParts, format("|cffffff80%s|r", label));
+        tinsert(statusDurParts, FormatDuration(data.symbolOfHopeExpiry, now));
+    end
+    if db.showPotionCooldown and data.potionExpiry and data.potionExpiry > now
+            and not (data.isDrinking and db.showDrinking)
+            and not (data.hasInnervate and db.showInnervate)
+            and not (data.hasManaTide and db.showManaTide)
+            and not (data.hasSymbolOfHope and db.showSymbolOfHope) then
         local remaining = floor(data.potionExpiry - now);
         local minutes = floor(remaining / 60);
         local seconds = remaining % 60;
@@ -621,6 +674,9 @@ ScanGroupComposition = function()
                     isDrinking = false,
                     hasInnervate = false,
                     hasManaTide = false,
+                    hasSoulstone = false,
+                    hasSymbolOfHope = false,
+                    symbolOfHopeExpiry = 0,
                     potionExpiry = 0,
                 };
             end
@@ -811,9 +867,12 @@ local function UpdateUnitBuffs(unit)
     data.isDrinking = false;
     data.hasInnervate = false;
     data.hasManaTide = false;
+    data.hasSoulstone = false;
+    data.hasSymbolOfHope = false;
     data.drinkExpiry = 0;
     data.innervateExpiry = 0;
     data.manaTideExpiry = 0;
+    data.symbolOfHopeExpiry = 0;
 
     local i = 1;
     while true do
@@ -833,6 +892,15 @@ local function UpdateUnitBuffs(unit)
         if name == MANA_TIDE_BUFF_NAME or name == "Mana Tide" then
             data.hasManaTide = true;
             data.manaTideExpiry = expirationTime or 0;
+        end
+
+        if SOULSTONE_BUFF_IDS[spellId] or name == SOULSTONE_SPELL_NAME then
+            data.hasSoulstone = true;
+        end
+
+        if spellId == SYMBOL_OF_HOPE_SPELL_ID or name == SYMBOL_OF_HOPE_SPELL_NAME then
+            data.hasSymbolOfHope = true;
+            data.symbolOfHopeExpiry = expirationTime or 0;
         end
 
         i = i + 1;
@@ -861,36 +929,70 @@ end
 --------------------------------------------------------------------------------
 
 local function ProcessCombatLog()
-    local _, subevent, _, sourceGUID, sourceName, sourceFlags, _, _, _, _, _, spellId, spellName =
+    local _, subevent, _, sourceGUID, sourceName, sourceFlags, _, destGUID, destName, destFlags, _, spellId, spellName =
         CombatLogGetCurrentEventInfo();
 
-    if subevent ~= "SPELL_CAST_SUCCESS" then return; end
-
-    -- Potion tracking (existing)
-    if POTION_SPELL_IDS[spellId] then
-        local data = healers[sourceGUID];
-        if data and data.isHealer then
-            data.potionExpiry = GetTime() + POTION_COOLDOWN_DURATION;
+    -- Potion tracking (SPELL_CAST_SUCCESS only)
+    if subevent == "SPELL_CAST_SUCCESS" then
+        if POTION_SPELL_IDS[spellId] then
+            local data = healers[sourceGUID];
+            if data and data.isHealer then
+                data.potionExpiry = GetTime() + POTION_COOLDOWN_DURATION;
+            end
         end
     end
 
-    -- Raid cooldown tracking
+    -- Raid cooldown tracking (SPELL_CAST_SUCCESS for most, SPELL_AURA_APPLIED for soulstone)
     local cdInfo = RAID_COOLDOWN_SPELLS[spellId];
     if cdInfo and db.showRaidCooldowns then
-        -- Verify source is in our group (COMBATLOG_OBJECT_AFFILIATION_MINE/PARTY/RAID = 0x07)
-        if sourceFlags and band(sourceFlags, 0x07) ~= 0 then
-            local _, engClass = GetPlayerInfoByGUID(sourceGUID);
-            local canonical = CANONICAL_SPELL_ID[spellId] or spellId;
-            local key = sourceGUID .. "-" .. canonical;
-            raidCooldowns[key] = {
-                sourceGUID = sourceGUID,
-                name = sourceName or "Unknown",
-                classFile = engClass or "UNKNOWN",
-                spellId = canonical,
-                icon = cdInfo.icon,
-                spellName = cdInfo.name,
-                expiryTime = GetTime() + cdInfo.duration,
-            };
+        if subevent == "SPELL_CAST_SUCCESS" and not SOULSTONE_BUFF_IDS[spellId] then
+            if sourceFlags and band(sourceFlags, 0x07) ~= 0 then
+                local _, engClass = GetPlayerInfoByGUID(sourceGUID);
+                local canonical = CANONICAL_SPELL_ID[spellId] or spellId;
+                local key = sourceGUID .. "-" .. canonical;
+                raidCooldowns[key] = {
+                    sourceGUID = sourceGUID,
+                    name = sourceName or "Unknown",
+                    classFile = engClass or "UNKNOWN",
+                    spellId = canonical,
+                    icon = cdInfo.icon,
+                    spellName = cdInfo.name,
+                    expiryTime = GetTime() + cdInfo.duration,
+                };
+            end
+        elseif subevent == "SPELL_AURA_APPLIED" and SOULSTONE_BUFF_IDS[spellId] then
+            -- Soulstone: source is the warlock, dest gets the buff
+            if sourceFlags and band(sourceFlags, 0x07) ~= 0 then
+                local _, engClass = GetPlayerInfoByGUID(sourceGUID);
+                local canonical = CANONICAL_SPELL_ID[spellId] or spellId;
+                local key = sourceGUID .. "-" .. canonical;
+                raidCooldowns[key] = {
+                    sourceGUID = sourceGUID,
+                    name = sourceName or "Unknown",
+                    classFile = engClass or "UNKNOWN",
+                    spellId = canonical,
+                    icon = cdInfo.icon,
+                    spellName = cdInfo.name,
+                    expiryTime = GetTime() + cdInfo.duration,
+                };
+            end
+            -- Mark the healer who received the soulstone
+            if destGUID then
+                local data = healers[destGUID];
+                if data and data.isHealer then
+                    data.hasSoulstone = true;
+                end
+            end
+        end
+    end
+
+    -- Clear soulstone on healer when buff is removed
+    if subevent == "SPELL_AURA_REMOVED" and SOULSTONE_BUFF_IDS[spellId] then
+        if destGUID then
+            local data = healers[destGUID];
+            if data then
+                data.hasSoulstone = false;
+            end
         end
     end
 end
@@ -901,40 +1003,25 @@ end
 
 local function CheckManaWarnings()
     if not db.sendWarnings then return; end
-    if not IsInGroup() then return; end
+    if not IsInGroup() and not db.sendWarningsSolo then return; end
 
     local now = GetTime();
     if now - lastWarningTime < db.warningCooldown then return; end
 
     local avgMana = GetAverageMana();
 
-    -- Reset warnings if mana recovered
-    if avgMana > db.warningThresholdHigh then
-        warningTriggered.high = false;
-        warningTriggered.med = false;
-        warningTriggered.low = false;
+    -- Reset warning if mana recovered above threshold
+    if avgMana > db.warningThreshold then
+        warningTriggered = false;
         return;
     end
 
-    local chatType = IsInRaid() and "RAID" or "PARTY";
-    local message = nil;
+    if warningTriggered then return; end
 
-    if avgMana <= db.warningThresholdLow and not warningTriggered.low then
-        message = format("[HealerMana] CRITICAL: Healer mana at %d%%!", avgMana);
-        warningTriggered.low = true;
-        warningTriggered.med = true;
-        warningTriggered.high = true;
-    elseif avgMana <= db.warningThresholdMed and not warningTriggered.med then
-        message = format("[HealerMana] WARNING: Healer mana at %d%%", avgMana);
-        warningTriggered.med = true;
-        warningTriggered.high = true;
-    elseif avgMana <= db.warningThresholdHigh and not warningTriggered.high then
-        message = format("[HealerMana] Healer mana below %d%% (avg: %d%%)", db.warningThresholdHigh, avgMana);
-        warningTriggered.high = true;
-    end
-
-    if message then
-        SendChatMessage(message, chatType);
+    if avgMana <= db.warningThreshold then
+        local chatType = IsInRaid() and "RAID" or (IsInGroup() and "PARTY" or "SAY");
+        SendChatMessage(format("[HealerMana] Healer mana low! Average: %d%%", avgMana), chatType);
+        warningTriggered = true;
         lastWarningTime = now;
     end
 end
@@ -1112,19 +1199,17 @@ local function CreateCdRowFrame()
     frame:SetSize(400, 16);
     frame:Hide();
 
-    -- Spell icon (left-anchored, trimmed borders)
-    frame.icon = frame:CreateTexture(nil, "ARTWORK");
-    frame.icon:SetSize(14, 14);
-    frame.icon:SetPoint("LEFT", 0, 0);
-    frame.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92);
-
-    -- Caster name (class-colored, after icon)
+    -- Caster name (class-colored, left-aligned)
     frame.nameText = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall");
-    frame.nameText:SetPoint("LEFT", frame.icon, "RIGHT", 4, 0);
+    frame.nameText:SetPoint("LEFT", 0, 0);
     frame.nameText:SetJustifyH("LEFT");
     frame.nameText:SetWordWrap(false);
 
-    -- Timer countdown
+    -- Spell name
+    frame.spellText = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall");
+    frame.spellText:SetJustifyH("LEFT");
+
+    -- Timer / Ready status
     frame.timerText = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall");
     frame.timerText:SetJustifyH("LEFT");
 
@@ -1181,9 +1266,12 @@ RefreshDisplay = function()
     -- Pre-compute text for all rows so we can measure actual content widths
     wipe(rowDataCache);
     local maxNameWidth = 0;
-    local maxManaWidth = 0;
+    -- Fixed-width columns to prevent jitter from changing numbers
+    local maxManaWidth = max(MeasureText("100%", db.fontSize), MeasureText("DEAD", db.fontSize));
     local maxStatusLabelWidth = 0;
     local maxStatusDurWidth = 0;
+    local durRefWidth = MeasureText("00:00", db.fontSize - 1);
+    local hasDuration = false;
 
     for _, data in ipairs(sortedHealers) do
         local manaStr;
@@ -1201,20 +1289,16 @@ RefreshDisplay = function()
         local durPlain = statusDur:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", "");
 
         local nw = MeasureText(data.name, db.fontSize);
-        local mw = MeasureText(manaStr, db.fontSize);
         local slw = 0;
         if labelPlain ~= "" then
             slw = MeasureText(labelPlain, db.fontSize - 1);
         end
-        local sdw = 0;
         if durPlain ~= "" then
-            sdw = MeasureText(durPlain, db.fontSize - 1);
+            hasDuration = true;
         end
 
         if nw > maxNameWidth then maxNameWidth = nw; end
-        if mw > maxManaWidth then maxManaWidth = mw; end
         if slw > maxStatusLabelWidth then maxStatusLabelWidth = slw; end
-        if sdw > maxStatusDurWidth then maxStatusDurWidth = sdw; end
 
         tinsert(rowDataCache, {
             data = data,
@@ -1223,6 +1307,7 @@ RefreshDisplay = function()
             statusDur = statusDur,
         });
     end
+    if hasDuration then maxStatusDurWidth = durRefWidth; end
 
     -- Add rendering buffer for outline font overshoot
     local pad = max(4, floor(db.fontSize * 0.35 + 0.5));
@@ -1339,10 +1424,7 @@ RefreshDisplay = function()
         if #sortedCooldownCache > 0 then
             local now = GetTime();
             sort(sortedCooldownCache, function(a, b)
-                local aReady = a.expiryTime <= now;
-                local bReady = b.expiryTime <= now;
-                if aReady ~= bReady then return bReady; end  -- on-CD first, ready last
-                return a.expiryTime < b.expiryTime;
+                return a.spellName < b.spellName;
             end);
 
             -- Draw separator
@@ -1353,33 +1435,29 @@ RefreshDisplay = function()
             HealerManaFrame.cdSeparator:Show();
             yOffset = yOffset - 4;
 
-            -- Measure max name width for alignment
+            -- Measure column widths for alignment
             local cdNameMax = 0;
+            local cdSpellMax = 0;
             local cdTimerMax = 0;
-            local iconSize = max(db.fontSize, 12);
             local cdFontSize = db.fontSize - 1;
             local now = GetTime();
 
+            -- Use fixed reference for timer column to prevent width jitter
+            cdTimerMax = MeasureText("Ready", cdFontSize);
             for _, entry in ipairs(sortedCooldownCache) do
                 local nw = MeasureText(entry.name, cdFontSize);
                 if nw > cdNameMax then cdNameMax = nw; end
-                local timerStr;
-                if entry.expiryTime <= now then
-                    timerStr = "Ready";
-                else
-                    local remaining = entry.expiryTime - now;
-                    timerStr = format("%d:%02d", floor(remaining / 60), floor(remaining) % 60);
-                end
-                local tw = MeasureText(timerStr, cdFontSize);
-                if tw > cdTimerMax then cdTimerMax = tw; end
+                local sw = MeasureText(entry.spellName, cdFontSize);
+                if sw > cdSpellMax then cdSpellMax = sw; end
             end
 
             local cdPad = max(4, floor(cdFontSize * 0.35 + 0.5));
             cdNameMax = cdNameMax + cdPad;
+            cdSpellMax = cdSpellMax + cdPad;
             cdTimerMax = cdTimerMax + cdPad;
 
             -- Check if cooldown section is wider than healer content
-            local cdContentWidth = iconSize + 4 + cdNameMax + colGap + cdTimerMax;
+            local cdContentWidth = cdNameMax + colGap + cdSpellMax + colGap + cdTimerMax;
             local cdTotalWidth = leftMargin + cdContentWidth + rightMargin;
             if cdTotalWidth > totalWidth then totalWidth = cdTotalWidth; end
 
@@ -1387,17 +1465,22 @@ RefreshDisplay = function()
             for _, entry in ipairs(sortedCooldownCache) do
                 local cdRow = AcquireCdRow();
 
-                cdRow.icon:SetSize(iconSize, iconSize);
-                cdRow.icon:SetTexture(entry.icon);
-
                 cdRow.nameText:SetFont(fontPath, cdFontSize, "OUTLINE");
                 cdRow.nameText:SetWidth(cdNameMax);
                 local cr, cg, cb = GetClassColor(entry.classFile);
                 cdRow.nameText:SetText(entry.name);
                 cdRow.nameText:SetTextColor(cr, cg, cb);
 
+                cdRow.spellText:ClearAllPoints();
+                cdRow.spellText:SetPoint("LEFT", cdRow.nameText, "RIGHT", colGap, 0);
+                cdRow.spellText:SetFont(fontPath, cdFontSize, "OUTLINE");
+                cdRow.spellText:SetWidth(cdSpellMax);
+                cdRow.spellText:SetText(entry.spellName);
+                local sr, sg, sb = GetClassColor(entry.classFile);
+                cdRow.spellText:SetTextColor(sr, sg, sb);
+
                 cdRow.timerText:ClearAllPoints();
-                cdRow.timerText:SetPoint("LEFT", cdRow.nameText, "RIGHT", colGap, 0);
+                cdRow.timerText:SetPoint("LEFT", cdRow.spellText, "RIGHT", colGap, 0);
                 cdRow.timerText:SetFont(fontPath, cdFontSize, "OUTLINE");
                 if entry.expiryTime <= now then
                     cdRow.timerText:SetText("Ready");
@@ -1463,12 +1546,18 @@ HealerManaFrame:SetScript("OnUpdate", function(self, elapsed)
                     if data.hasManaTide and data.manaTideExpiry > 0 and data.manaTideExpiry <= now then
                         data.manaTideExpiry = now + 8;
                     end
+                    if data.hasSymbolOfHope and data.symbolOfHopeExpiry > 0 and data.symbolOfHopeExpiry <= now then
+                        data.symbolOfHopeExpiry = now + 15;
+                    end
+                    if data.potionExpiry > 0 and data.potionExpiry <= now then
+                        data.potionExpiry = now + 90;
+                    end
                 end
             end
             -- Loop some preview raid cooldown timers; leave others as "Ready"
             for key, entry in pairs(raidCooldowns) do
                 if entry.expiryTime <= now then
-                    if key == "preview-inn" or key == "preview-rebirth" then
+                    if key == "preview-inn" or key == "preview-rebirth" or key == "preview-ss" or key == "preview-pi" or key == "preview-loh" then
                         -- Leave expired so they show "Ready"
                     else
                         entry.expiryTime = now + RAID_COOLDOWN_SPELLS[entry.spellId].duration;
@@ -1489,8 +1578,17 @@ end);
 -- Background OnUpdate: always runs (inspect queue + display visibility check)
 -- Separate frame because HealerManaFrame is hidden until healers are confirmed,
 -- and hidden frames don't receive OnUpdate in WoW.
+local previewFromSettings = false;
+local settingsPanelHooked = false;
+
 local BackgroundFrame = CreateFrame("Frame");
 BackgroundFrame:SetScript("OnUpdate", function(self, elapsed)
+    -- Stop settings preview when panel closes
+    if previewFromSettings and SettingsPanel and not SettingsPanel:IsShown() then
+        StopPreview();
+        previewFromSettings = false;
+    end
+
     if previewActive then return; end
 
     inspectElapsed = inspectElapsed + elapsed;
@@ -1523,13 +1621,14 @@ end);
 --------------------------------------------------------------------------------
 
 local PREVIEW_DATA = {
-    { name = "Holypriest", classFile = "PRIEST", baseMana = 82, driftSeed = 1.0 },
+    { name = "Holypriest", classFile = "PRIEST", baseMana = 82, hasPotion = true, hasSymbolOfHope = true, driftSeed = 1.0 },
     { name = "Treehugger", classFile = "DRUID", baseMana = 45, isDrinking = true, driftSeed = 1.4 },
     { name = "Palaheals", classFile = "PALADIN", baseMana = 18, hasInnervate = true, driftSeed = 0.7 },
     { name = "Tidecaller", classFile = "SHAMAN", baseMana = 64, hasManaTide = true, driftSeed = 1.2 },
+    { name = "Soulstoned", classFile = "PALADIN", hasSoulstone = true, driftSeed = 0 },
 };
 
-local function StartPreview()
+StartPreview = function()
     if previewActive then return; end
     previewActive = true;
     previewTimer = 0;
@@ -1549,16 +1648,19 @@ local function StartPreview()
             name = td.name,
             classFile = td.classFile,
             isHealer = true,
-            manaPercent = td.baseMana,
+            manaPercent = td.baseMana or -2,
             baseMana = td.baseMana,
             driftSeed = td.driftSeed,
             isDrinking = td.isDrinking or false,
             hasInnervate = td.hasInnervate or false,
             hasManaTide = td.hasManaTide or false,
+            hasSoulstone = td.hasSoulstone or false,
+            hasSymbolOfHope = td.hasSymbolOfHope or false,
             drinkExpiry = td.isDrinking and (GetTime() + 18) or 0,
             innervateExpiry = td.hasInnervate and (GetTime() + 12) or 0,
             manaTideExpiry = td.hasManaTide and (GetTime() + 8) or 0,
-            potionExpiry = 0,
+            symbolOfHopeExpiry = td.hasSymbolOfHope and (GetTime() + 15) or 0,
+            potionExpiry = td.hasPotion and (GetTime() + 90) or 0,
         };
     end
 
@@ -1612,13 +1714,51 @@ local function StartPreview()
         spellName = rebirthInfo.name,
         expiryTime = now + 900,
     };
+    raidCooldowns["preview-ss"] = {
+        sourceGUID = "preview-guid-ss",
+        name = "Shadowlock",
+        classFile = "WARLOCK",
+        spellId = 20707,
+        icon = soulstoneInfo.icon,
+        spellName = soulstoneInfo.name,
+        expiryTime = now + 1200,
+    };
+    raidCooldowns["preview-loh"] = {
+        sourceGUID = "preview-guid-3",
+        name = "Palaheals",
+        classFile = "PALADIN",
+        spellId = 633,
+        icon = layOnHandsInfo.icon,
+        spellName = layOnHandsInfo.name,
+        expiryTime = now - 1,  -- starts as "Ready"
+    };
+    local piInfo = RAID_COOLDOWN_SPELLS[POWER_INFUSION_SPELL_ID];
+    raidCooldowns["preview-pi"] = {
+        sourceGUID = "preview-guid-1",
+        name = "Holypriest",
+        classFile = "PRIEST",
+        spellId = POWER_INFUSION_SPELL_ID,
+        icon = piInfo.icon,
+        spellName = piInfo.name,
+        expiryTime = now - 1,  -- starts as "Ready"
+    };
+    local sohInfo = RAID_COOLDOWN_SPELLS[SYMBOL_OF_HOPE_SPELL_ID];
+    raidCooldowns["preview-soh"] = {
+        sourceGUID = "preview-guid-1",
+        name = "Holypriest",
+        classFile = "PRIEST",
+        spellId = SYMBOL_OF_HOPE_SPELL_ID,
+        icon = sohInfo.icon,
+        spellName = sohInfo.name,
+        expiryTime = now + 240,
+    };
 
     -- Unlock frame for dragging while options are open
     HealerManaFrame:EnableMouse(true);
     RefreshDisplay();
 end
 
-local function StopPreview()
+StopPreview = function()
     if not previewActive then return; end
     previewActive = false;
 
@@ -1640,634 +1780,198 @@ local function StopPreview()
         savedRaidCooldowns = nil;
     end
 
-    -- Restore lock state
+    -- Restore lock state and frame strata
     HealerManaFrame:EnableMouse(not db.locked);
+    HealerManaFrame:SetFrameStrata("MEDIUM");
     RefreshDisplay();
 end
 
 --------------------------------------------------------------------------------
--- Options GUI
+-- Options GUI (native Settings API)
 --------------------------------------------------------------------------------
 
-local OptionsFrame;
+local healerManaCategoryID;
 
--- Backdrop templates (matching ScrollingLoot style)
-local FrameBackdrop = {
-    bgFile = "Interface\\ChatFrame\\ChatFrameBackground",
-    edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
-    tile = true, tileSize = 16, edgeSize = 32,
-    insets = { left = 8, right = 8, top = 8, bottom = 8 }
-};
+-- Sort value mapping (Settings dropdown uses numeric keys)
+local SORT_MAP = { [1] = "mana", [2] = "name" };
+local SORT_REVERSE = { mana = 1, name = 2 };
 
-local SliderBackdrop = {
-    bgFile = "Interface\\Buttons\\UI-SliderBar-Background",
-    edgeFile = "Interface\\Buttons\\UI-SliderBar-Border",
-    tile = true, tileSize = 8, edgeSize = 8,
-    insets = { left = 3, right = 3, top = 6, bottom = 6 }
-};
+local function RegisterSettings()
+    local category, layout = Settings.RegisterVerticalLayoutCategory("HealerMana");
 
-local EditBoxBackdrop = {
-    bgFile = "Interface\\ChatFrame\\ChatFrameBackground",
-    edgeFile = "Interface\\ChatFrame\\ChatFrameBackground",
-    tile = true, edgeSize = 1, tileSize = 5,
-};
-
-local PaneBackdrop = {
-    bgFile = "Interface\\ChatFrame\\ChatFrameBackground",
-    edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
-    tile = true, tileSize = 16, edgeSize = 16,
-    insets = { left = 3, right = 3, top = 5, bottom = 3 }
-};
-
--- Create a slider widget
-local function CreateSlider(parent, label, minVal, maxVal, step, width)
-    local container = CreateFrame("Frame", nil, parent);
-    container:SetSize(width or 200, 50);
-
-    local labelText = container:CreateFontString(nil, "OVERLAY", "GameFontNormal");
-    labelText:SetPoint("TOPLEFT");
-    labelText:SetPoint("TOPRIGHT");
-    labelText:SetJustifyH("CENTER");
-    labelText:SetHeight(15);
-    labelText:SetText(label);
-    labelText:SetTextColor(1, 0.82, 0);
-
-    local slider = CreateFrame("Slider", nil, container, "BackdropTemplate");
-    slider:SetOrientation("HORIZONTAL");
-    slider:SetSize(width or 200, 15);
-    slider:SetPoint("TOP", labelText, "BOTTOM", 0, -2);
-    slider:SetBackdrop(SliderBackdrop);
-    slider:SetThumbTexture("Interface\\Buttons\\UI-SliderBar-Button-Horizontal");
-    slider:SetMinMaxValues(minVal, maxVal);
-    slider:SetValueStep(step or 1);
-    slider:SetObeyStepOnDrag(true);
-
-    local lowText = slider:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall");
-    lowText:SetPoint("TOPLEFT", slider, "BOTTOMLEFT", 2, 3);
-    lowText:SetText(minVal);
-
-    local highText = slider:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall");
-    highText:SetPoint("TOPRIGHT", slider, "BOTTOMRIGHT", -2, 3);
-    highText:SetText(maxVal);
-
-    local editBox = CreateFrame("EditBox", nil, container, "BackdropTemplate");
-    editBox:SetAutoFocus(false);
-    editBox:SetFontObject(GameFontHighlightSmall);
-    editBox:SetPoint("TOP", slider, "BOTTOM", 0, -2);
-    editBox:SetSize(60, 14);
-    editBox:SetJustifyH("CENTER");
-    editBox:EnableMouse(true);
-    editBox:SetBackdrop(EditBoxBackdrop);
-    editBox:SetBackdropColor(0, 0, 0, 0.5);
-    editBox:SetBackdropBorderColor(0.3, 0.3, 0.3, 0.8);
-
-    slider:SetScript("OnValueChanged", function(self, value)
-        value = floor(value / step + 0.5) * step;
-        editBox:SetText(value);
-        if container.OnValueChanged then
-            container:OnValueChanged(value);
-        end
-    end);
-
-    editBox:SetScript("OnEnterPressed", function(self)
-        local value = tonumber(self:GetText());
-        if value then
-            value = max(minVal, min(maxVal, value));
-            slider:SetValue(value);
-        end
-        self:ClearFocus();
-    end);
-
-    editBox:SetScript("OnEscapePressed", function(self)
-        self:SetText(floor(slider:GetValue() / step + 0.5) * step);
-        self:ClearFocus();
-    end);
-
-    container.slider = slider;
-    container.editBox = editBox;
-    container.labelText = labelText;
-
-    function container:SetValue(value)
-        slider:SetValue(value);
-        editBox:SetText(floor(value / step + 0.5) * step);
+    -- Helper: register a boolean proxy setting + checkbox
+    local function AddCheckbox(key, name, tooltip, onChange)
+        local setting = Settings.RegisterProxySetting(category,
+            "HEALERMANA_" .. key:upper(), Settings.VarType.Boolean, name,
+            DEFAULT_SETTINGS[key],
+            function() return db[key]; end,
+            function(value)
+                db[key] = value;
+                if onChange then onChange(value); end
+            end);
+        return Settings.CreateCheckbox(category, setting, tooltip);
     end
 
-    function container:GetValue()
-        return slider:GetValue();
+    -- Helper: register a numeric proxy setting + slider
+    local function AddSlider(key, name, tooltip, minVal, maxVal, step, onChange, getFn, setFn)
+        local setting = Settings.RegisterProxySetting(category,
+            "HEALERMANA_" .. key:upper(), Settings.VarType.Number, name,
+            getFn and getFn(DEFAULT_SETTINGS[key]) or DEFAULT_SETTINGS[key],
+            getFn and function() return getFn(db[key]); end or function() return db[key]; end,
+            function(value)
+                if setFn then
+                    db[key] = setFn(value);
+                else
+                    db[key] = value;
+                end
+                if onChange then onChange(value); end
+            end);
+        local options = Settings.CreateSliderOptions(minVal, maxVal, step);
+        options:SetLabelFormatter(MinimalSliderWithSteppersMixin.Label.Right);
+        return Settings.CreateSlider(category, setting, options, tooltip);
     end
 
-    return container;
-end
+    -------------------------
+    -- Section: Display
+    -------------------------
+    layout:AddInitializer(CreateSettingsListSectionHeaderInitializer("Display"));
 
--- Create a checkbox widget
-local function CreateCheckbox(parent, label, width)
-    local container = CreateFrame("Frame", nil, parent);
-    container:SetSize(width or 200, 24);
+    AddCheckbox("enabled", "Enable HealerMana",
+        "Toggle the HealerMana display on or off.",
+        function() RefreshDisplay(); end);
 
-    local checkbox = CreateFrame("CheckButton", nil, container, "UICheckButtonTemplate");
-    checkbox:SetPoint("LEFT");
-    checkbox:SetSize(24, 24);
-
-    local labelText = container:CreateFontString(nil, "OVERLAY", "GameFontHighlight");
-    labelText:SetPoint("LEFT", checkbox, "RIGHT", 2, 0);
-    labelText:SetText(label);
-
-    checkbox:SetScript("OnClick", function(self)
-        PlaySound(self:GetChecked() and 856 or 857);
-        if container.OnValueChanged then
-            container:OnValueChanged(self:GetChecked());
-        end
-    end);
-
-    container.checkbox = checkbox;
-    container.labelText = labelText;
-
-    function container:SetValue(value)
-        checkbox:SetChecked(value);
-    end
-
-    function container:GetValue()
-        return checkbox:GetChecked();
-    end
-
-    return container;
-end
-
--- Create a dropdown widget
-local function CreateDropdown(parent, label, options, width)
-    local container = CreateFrame("Frame", nil, parent);
-    container:SetSize(width or 200, 50);
-
-    local labelText = container:CreateFontString(nil, "OVERLAY", "GameFontNormal");
-    labelText:SetPoint("TOPLEFT");
-    labelText:SetPoint("TOPRIGHT");
-    labelText:SetJustifyH("CENTER");
-    labelText:SetHeight(15);
-    labelText:SetText(label);
-    labelText:SetTextColor(1, 0.82, 0);
-
-    local dropdown = CreateFrame("Frame", nil, container, "BackdropTemplate");
-    dropdown:SetSize(width or 200, 24);
-    dropdown:SetPoint("TOP", labelText, "BOTTOM", 0, -2);
-    dropdown:SetBackdrop(PaneBackdrop);
-    dropdown:SetBackdropColor(0.1, 0.1, 0.1);
-    dropdown:SetBackdropBorderColor(0.4, 0.4, 0.4);
-
-    local selectedText = dropdown:CreateFontString(nil, "OVERLAY", "GameFontHighlight");
-    selectedText:SetPoint("LEFT", 8, 0);
-    selectedText:SetPoint("RIGHT", -24, 0);
-    selectedText:SetJustifyH("LEFT");
-
-    local expandButton = CreateFrame("Button", nil, dropdown);
-    expandButton:SetSize(20, 20);
-    expandButton:SetPoint("RIGHT", -2, 0);
-    expandButton:SetNormalTexture("Interface\\ChatFrame\\UI-ChatIcon-ScrollDown-Up");
-    expandButton:SetPushedTexture("Interface\\ChatFrame\\UI-ChatIcon-ScrollDown-Down");
-    expandButton:SetHighlightTexture("Interface\\Buttons\\UI-Common-MouseHilight", "ADD");
-
-    local menuFrame = CreateFrame("Frame", nil, dropdown, "BackdropTemplate");
-    menuFrame:SetBackdrop(PaneBackdrop);
-    menuFrame:SetBackdropColor(0.1, 0.1, 0.1);
-    menuFrame:SetBackdropBorderColor(0.4, 0.4, 0.4);
-    menuFrame:SetPoint("TOP", dropdown, "BOTTOM", 0, 2);
-    menuFrame:SetFrameStrata("TOOLTIP");
-    menuFrame:SetFrameLevel(200);
-    menuFrame:Hide();
-
-    local buttonHeight = 20;
-    local menuHeight = 4;
-
-    for i, opt in ipairs(options) do
-        local btn = CreateFrame("Button", nil, menuFrame);
-        btn:SetSize((width or 200) - 6, buttonHeight);
-        btn:SetPoint("TOPLEFT", 3, -2 - (i - 1) * buttonHeight);
-
-        local btnText = btn:CreateFontString(nil, "OVERLAY", "GameFontHighlight");
-        btnText:SetPoint("LEFT", 4, 0);
-        btnText:SetText(opt.text);
-
-        local highlight = btn:CreateTexture(nil, "HIGHLIGHT");
-        highlight:SetAllPoints();
-        highlight:SetColorTexture(0.3, 0.3, 0.5, 0.5);
-
-        btn:SetScript("OnClick", function()
-            container.selectedValue = opt.value;
-            selectedText:SetText(opt.text);
-            menuFrame:Hide();
-            PlaySound(856);
-            if container.OnValueChanged then
-                container:OnValueChanged(opt.value);
+    AddCheckbox("showSolo", "Show When Solo",
+        "Show the frame even when not in a group.",
+        function(value)
+            if not previewActive and value and not IsInGroup() then
+                ScanGroupComposition();
             end
         end);
 
-        menuHeight = menuHeight + buttonHeight;
-    end
+    AddCheckbox("showAverageMana", "Show Average Mana",
+        "Display the average mana percentage across all healers.");
 
-    menuFrame:SetSize((width or 200), menuHeight + 4);
-
-    local function ToggleMenu()
-        if menuFrame:IsShown() then
-            menuFrame:Hide();
-        else
-            menuFrame:Show();
-        end
-    end
-
-    expandButton:SetScript("OnClick", ToggleMenu);
-    dropdown:EnableMouse(true);
-    dropdown:SetScript("OnMouseDown", ToggleMenu);
-
-    menuFrame:SetScript("OnShow", function()
-        menuFrame:SetScript("OnUpdate", function()
-            if not dropdown:IsMouseOver() and not menuFrame:IsMouseOver() then
-                menuFrame:Hide();
-            end
+    AddCheckbox("locked", "Lock Frame Position",
+        "Prevent the frame from being dragged.",
+        function(value)
+            HealerManaFrame:EnableMouse(not value);
+            UpdateResizeHandleVisibility();
         end);
-    end);
-
-    menuFrame:SetScript("OnHide", function()
-        menuFrame:SetScript("OnUpdate", nil);
-    end);
-
-    container.dropdown = dropdown;
-    container.selectedText = selectedText;
-
-    function container:SetValue(value)
-        container.selectedValue = value;
-        for _, opt in ipairs(options) do
-            if opt.value == value then
-                selectedText:SetText(opt.text);
-                break;
-            end
-        end
-    end
-
-    function container:GetValue()
-        return container.selectedValue;
-    end
-
-    return container;
-end
-
--- Create the main options frame
-local function CreateOptionsFrame()
-    if OptionsFrame then return OptionsFrame; end
-
-    local frame = CreateFrame("Frame", "HealerManaOptionsFrame", UIParent, "BackdropTemplate");
-    frame:SetSize(520, 680);
-    frame:SetPoint("CENTER");
-    frame:SetBackdrop(FrameBackdrop);
-    frame:SetBackdropColor(0, 0, 0, db.optionsBgOpacity);
-    frame:SetMovable(true);
-    frame:EnableMouse(true);
-    frame:SetToplevel(true);
-    frame:SetFrameStrata("DIALOG");
-    frame:SetFrameLevel(100);
-    frame:Hide();
-
-    -- Title bar
-    local titleBg = frame:CreateTexture(nil, "OVERLAY");
-    titleBg:SetTexture("Interface\\DialogFrame\\UI-DialogBox-Header");
-    titleBg:SetTexCoord(0.31, 0.67, 0, 0.63);
-    titleBg:SetPoint("TOP", 0, 12);
-    titleBg:SetSize(200, 40);
-
-    local titleText = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal");
-    titleText:SetPoint("TOP", titleBg, "TOP", 0, -14);
-    titleText:SetText("HealerMana Options");
-
-    local titleBgL = frame:CreateTexture(nil, "OVERLAY");
-    titleBgL:SetTexture("Interface\\DialogFrame\\UI-DialogBox-Header");
-    titleBgL:SetTexCoord(0.21, 0.31, 0, 0.63);
-    titleBgL:SetPoint("RIGHT", titleBg, "LEFT");
-    titleBgL:SetSize(30, 40);
-
-    local titleBgR = frame:CreateTexture(nil, "OVERLAY");
-    titleBgR:SetTexture("Interface\\DialogFrame\\UI-DialogBox-Header");
-    titleBgR:SetTexCoord(0.67, 0.77, 0, 0.63);
-    titleBgR:SetPoint("LEFT", titleBg, "RIGHT");
-    titleBgR:SetSize(30, 40);
-
-    -- Make draggable
-    frame:RegisterForDrag("LeftButton");
-    frame:SetScript("OnDragStart", frame.StartMoving);
-    frame:SetScript("OnDragStop", frame.StopMovingOrSizing);
-
-    -- Close button
-    local closeButton = CreateFrame("Button", nil, frame, "UIPanelCloseButton");
-    closeButton:SetPoint("TOPRIGHT", -5, -5);
-
-    -- Content area
-    local contentWidth = 230;
-    local leftX = 20;
-    local rightX = 270;
-    local startY = -35;
-
-    -------------------------------
-    -- LEFT COLUMN: Toggle Settings
-    -------------------------------
-    local y = startY;
-
-    -- Section header
-    local displayHeader = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal");
-    displayHeader:SetPoint("TOPLEFT", leftX, y);
-    displayHeader:SetText("Display Settings");
-    displayHeader:SetTextColor(1, 0.82, 0);
-    y = y - 22;
-
-    local enabledCheck = CreateCheckbox(frame, "Enable HealerMana", contentWidth);
-    enabledCheck:SetPoint("TOPLEFT", leftX, y);
-    enabledCheck:SetValue(db.enabled);
-    enabledCheck.OnValueChanged = function(self, value)
-        db.enabled = value;
-        RefreshDisplay();
-    end;
-    y = y - 26;
-
-    local showSoloCheck = CreateCheckbox(frame, "Show When Solo", contentWidth);
-    showSoloCheck:SetPoint("TOPLEFT", leftX, y);
-    showSoloCheck:SetValue(db.showSolo);
-    showSoloCheck.OnValueChanged = function(self, value)
-        db.showSolo = value;
-        if not previewActive and value and not IsInGroup() then
-            ScanGroupComposition();
-        end
-    end;
-    y = y - 26;
-
-    local showAvgCheck = CreateCheckbox(frame, "Show Average Mana", contentWidth);
-    showAvgCheck:SetPoint("TOPLEFT", leftX, y);
-    showAvgCheck:SetValue(db.showAverageMana);
-    showAvgCheck.OnValueChanged = function(self, value)
-        db.showAverageMana = value;
-    end;
-    y = y - 26;
-
-    local showDrinkCheck = CreateCheckbox(frame, "Show Drinking Status", contentWidth);
-    showDrinkCheck:SetPoint("TOPLEFT", leftX, y);
-    showDrinkCheck:SetValue(db.showDrinking);
-    showDrinkCheck.OnValueChanged = function(self, value)
-        db.showDrinking = value;
-    end;
-    y = y - 26;
-
-    local showInnervateCheck = CreateCheckbox(frame, "Show Innervate", contentWidth);
-    showInnervateCheck:SetPoint("TOPLEFT", leftX, y);
-    showInnervateCheck:SetValue(db.showInnervate);
-    showInnervateCheck.OnValueChanged = function(self, value)
-        db.showInnervate = value;
-    end;
-    y = y - 26;
-
-    local showManaTideCheck = CreateCheckbox(frame, "Show Mana Tide", contentWidth);
-    showManaTideCheck:SetPoint("TOPLEFT", leftX, y);
-    showManaTideCheck:SetValue(db.showManaTide);
-    showManaTideCheck.OnValueChanged = function(self, value)
-        db.showManaTide = value;
-    end;
-    y = y - 26;
-
-    local showPotionCheck = CreateCheckbox(frame, "Show Potion Cooldowns", contentWidth);
-    showPotionCheck:SetPoint("TOPLEFT", leftX, y);
-    showPotionCheck:SetValue(db.showPotionCooldown);
-    showPotionCheck.OnValueChanged = function(self, value)
-        db.showPotionCooldown = value;
-    end;
-    y = y - 26;
-
-    local showRaidCdCheck = CreateCheckbox(frame, "Show Raid Cooldowns", contentWidth);
-    showRaidCdCheck:SetPoint("TOPLEFT", leftX, y);
-    showRaidCdCheck:SetValue(db.showRaidCooldowns);
-    showRaidCdCheck.OnValueChanged = function(self, value)
-        db.showRaidCooldowns = value;
-    end;
-    y = y - 26;
-
-    local shortenedCheck = CreateCheckbox(frame, "Shortened Status Labels", contentWidth);
-    shortenedCheck:SetPoint("TOPLEFT", leftX, y);
-    shortenedCheck:SetValue(db.shortenedStatus);
-    shortenedCheck.OnValueChanged = function(self, value)
-        db.shortenedStatus = value;
-    end;
-    y = y - 26;
-
-    local showDurationCheck = CreateCheckbox(frame, "Show Buff Durations", contentWidth);
-    showDurationCheck:SetPoint("TOPLEFT", leftX, y);
-    showDurationCheck:SetValue(db.showStatusDuration);
-    showDurationCheck.OnValueChanged = function(self, value)
-        db.showStatusDuration = value;
-    end;
-    y = y - 26;
-
-    local lockedCheck = CreateCheckbox(frame, "Lock Frame Position", contentWidth);
-    lockedCheck:SetPoint("TOPLEFT", leftX, y);
-    lockedCheck:SetValue(db.locked);
-    lockedCheck.OnValueChanged = function(self, value)
-        db.locked = value;
-        HealerManaFrame:EnableMouse(not value);
-        UpdateResizeHandleVisibility();
-    end;
-    y = y - 30;
-
-    -- Warning section header
-    local warnHeader = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal");
-    warnHeader:SetPoint("TOPLEFT", leftX, y);
-    warnHeader:SetText("Chat Warnings");
-    warnHeader:SetTextColor(1, 0.82, 0);
-    y = y - 22;
-
-    local sendWarnCheck = CreateCheckbox(frame, "Send Warning Messages", contentWidth);
-    sendWarnCheck:SetPoint("TOPLEFT", leftX, y);
-    sendWarnCheck:SetValue(db.sendWarnings);
-    sendWarnCheck.OnValueChanged = function(self, value)
-        db.sendWarnings = value;
-    end;
-    y = y - 30;
-
-    local warnCooldownSlider = CreateSlider(frame, "Warning Cooldown (sec)", 10, 120, 5, contentWidth);
-    warnCooldownSlider:SetPoint("TOPLEFT", leftX, y);
-    warnCooldownSlider:SetValue(db.warningCooldown);
-    warnCooldownSlider.OnValueChanged = function(self, value)
-        db.warningCooldown = value;
-    end;
-    y = y - 58;
-
-    local warnHighSlider = CreateSlider(frame, "Warning High Threshold (%)", 10, 60, 5, contentWidth);
-    warnHighSlider:SetPoint("TOPLEFT", leftX, y);
-    warnHighSlider:SetValue(db.warningThresholdHigh);
-    warnHighSlider.OnValueChanged = function(self, value)
-        db.warningThresholdHigh = value;
-    end;
-    y = y - 58;
-
-    local warnMedSlider = CreateSlider(frame, "Warning Medium Threshold (%)", 5, 50, 5, contentWidth);
-    warnMedSlider:SetPoint("TOPLEFT", leftX, y);
-    warnMedSlider:SetValue(db.warningThresholdMed);
-    warnMedSlider.OnValueChanged = function(self, value)
-        db.warningThresholdMed = value;
-    end;
-    y = y - 58;
-
-    local warnLowSlider = CreateSlider(frame, "Warning Low Threshold (%)", 1, 30, 1, contentWidth);
-    warnLowSlider:SetPoint("TOPLEFT", leftX, y);
-    warnLowSlider:SetValue(db.warningThresholdLow);
-    warnLowSlider.OnValueChanged = function(self, value)
-        db.warningThresholdLow = value;
-    end;
-
-    --------------------------------
-    -- RIGHT COLUMN: Appearance
-    --------------------------------
-    y = startY;
-
-    local appearHeader = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal");
-    appearHeader:SetPoint("TOPLEFT", rightX, y);
-    appearHeader:SetText("Appearance");
-    appearHeader:SetTextColor(1, 0.82, 0);
-    y = y - 26;
-
-    local fontSizeSlider = CreateSlider(frame, "Font Size", 8, 24, 1, contentWidth);
-    fontSizeSlider:SetPoint("TOPLEFT", rightX, y);
-    fontSizeSlider:SetValue(db.fontSize);
-    fontSizeSlider.OnValueChanged = function(self, value)
-        db.fontSize = value;
-    end;
-    y = y - 58;
-
-    local scaleSlider = CreateSlider(frame, "Scale", 0.5, 2.0, 0.1, contentWidth);
-    scaleSlider:SetPoint("TOPLEFT", rightX, y);
-    scaleSlider:SetValue(db.scale);
-    scaleSlider.OnValueChanged = function(self, value)
-        db.scale = value;
-        HealerManaFrame:SetScale(value);
-    end;
-    y = y - 58;
-
-    local bgOpacitySlider = CreateSlider(frame, "Display Opacity (%)", 0, 100, 5, contentWidth);
-    bgOpacitySlider:SetPoint("TOPLEFT", rightX, y);
-    bgOpacitySlider:SetValue(db.bgOpacity * 100);
-    bgOpacitySlider.OnValueChanged = function(self, value)
-        db.bgOpacity = value / 100;
-        HealerManaFrame:SetBackdropColor(0, 0, 0, db.bgOpacity);
-    end;
-    y = y - 58;
-
-    local optBgSlider = CreateSlider(frame, "Options Panel Opacity (%)", 0, 100, 5, contentWidth);
-    optBgSlider:SetPoint("TOPLEFT", rightX, y);
-    optBgSlider:SetValue(db.optionsBgOpacity * 100);
-    optBgSlider.OnValueChanged = function(self, value)
-        db.optionsBgOpacity = value / 100;
-        frame:SetBackdropColor(0, 0, 0, db.optionsBgOpacity);
-    end;
-    y = y - 62;
-
-    -- Color threshold section
-    local colorHeader = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal");
-    colorHeader:SetPoint("TOPLEFT", rightX, y);
-    colorHeader:SetText("Mana Color Thresholds");
-    colorHeader:SetTextColor(1, 0.82, 0);
-    y = y - 26;
-
-    local greenSlider = CreateSlider(frame, "Green (above %)", 50, 100, 5, contentWidth);
-    greenSlider:SetPoint("TOPLEFT", rightX, y);
-    greenSlider:SetValue(db.colorThresholdGreen);
-    greenSlider.OnValueChanged = function(self, value)
-        db.colorThresholdGreen = value;
-    end;
-    y = y - 58;
-
-    local yellowSlider = CreateSlider(frame, "Yellow (above %)", 25, 75, 5, contentWidth);
-    yellowSlider:SetPoint("TOPLEFT", rightX, y);
-    yellowSlider:SetValue(db.colorThresholdYellow);
-    yellowSlider.OnValueChanged = function(self, value)
-        db.colorThresholdYellow = value;
-    end;
-    y = y - 58;
-
-    local orangeSlider = CreateSlider(frame, "Orange (above %)", 0, 50, 5, contentWidth);
-    orangeSlider:SetPoint("TOPLEFT", rightX, y);
-    orangeSlider:SetValue(db.colorThresholdOrange);
-    orangeSlider.OnValueChanged = function(self, value)
-        db.colorThresholdOrange = value;
-    end;
-    y = y - 62;
 
     -- Sort dropdown
-    local sortDropdown = CreateDropdown(frame, "Sort Healers By", {
-        { text = "Lowest Mana First", value = "mana" },
-        { text = "Name (A-Z)", value = "name" },
-    }, contentWidth);
-    sortDropdown:SetPoint("TOPLEFT", rightX, y);
-    sortDropdown:SetValue(db.sortBy);
-    sortDropdown.OnValueChanged = function(self, value)
-        db.sortBy = value;
-    end;
+    local sortSetting = Settings.RegisterProxySetting(category,
+        "HEALERMANA_SORT_BY", Settings.VarType.Number, "Sort Healers By",
+        SORT_REVERSE[DEFAULT_SETTINGS.sortBy] or 1,
+        function() return SORT_REVERSE[db.sortBy] or 1; end,
+        function(value) db.sortBy = SORT_MAP[value] or "mana"; end);
+    local function GetSortOptions()
+        local container = Settings.CreateControlTextContainer();
+        container:Add(1, "Lowest Mana First");
+        container:Add(2, "Name (A-Z)");
+        return container:GetData();
+    end
+    Settings.CreateDropdown(category, sortSetting, GetSortOptions,
+        "How to order healers in the display.");
 
-    -- Reset button (bottom center)
-    local resetButton = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate");
-    resetButton:SetSize(140, 24);
-    resetButton:SetPoint("BOTTOM", 0, 18);
-    resetButton:SetText("Reset Defaults");
-    resetButton:SetScript("OnClick", function()
-        for key, value in pairs(DEFAULT_SETTINGS) do
-            db[key] = value;
-        end
-        -- Refresh all widgets
-        enabledCheck:SetValue(db.enabled);
-        showSoloCheck:SetValue(db.showSolo);
-        showAvgCheck:SetValue(db.showAverageMana);
-        showDrinkCheck:SetValue(db.showDrinking);
-        showInnervateCheck:SetValue(db.showInnervate);
-        showManaTideCheck:SetValue(db.showManaTide);
-        showPotionCheck:SetValue(db.showPotionCooldown);
-        showRaidCdCheck:SetValue(db.showRaidCooldowns);
-        shortenedCheck:SetValue(db.shortenedStatus);
-        showDurationCheck:SetValue(db.showStatusDuration);
-        lockedCheck:SetValue(db.locked);
-        sendWarnCheck:SetValue(db.sendWarnings);
-        warnCooldownSlider:SetValue(db.warningCooldown);
-        warnHighSlider:SetValue(db.warningThresholdHigh);
-        warnMedSlider:SetValue(db.warningThresholdMed);
-        warnLowSlider:SetValue(db.warningThresholdLow);
-        fontSizeSlider:SetValue(db.fontSize);
-        scaleSlider:SetValue(db.scale);
-        bgOpacitySlider:SetValue(db.bgOpacity * 100);
-        greenSlider:SetValue(db.colorThresholdGreen);
-        yellowSlider:SetValue(db.colorThresholdYellow);
-        orangeSlider:SetValue(db.colorThresholdOrange);
-        sortDropdown:SetValue(db.sortBy);
-        optBgSlider:SetValue(db.optionsBgOpacity * 100);
-        frame:SetBackdropColor(0, 0, 0, db.optionsBgOpacity);
-        -- Reset frame position
-        HealerManaFrame:SetScale(db.scale);
-        HealerManaFrame:SetBackdropColor(0, 0, 0, db.bgOpacity);
-        HealerManaFrame:EnableMouse(not db.locked);
-        UpdateResizeHandleVisibility();
-        HealerManaFrame:ClearAllPoints();
-        HealerManaFrame:SetPoint("LEFT", UIParent, "LEFT", 20, 100);
-        db.frameX = nil;
-        db.frameY = nil;
-        print("|cff00ff00HealerMana|r settings reset to defaults.");
-    end);
+    -------------------------
+    -- Section: Status Indicators
+    -------------------------
+    layout:AddInitializer(CreateSettingsListSectionHeaderInitializer("Status Indicators"));
 
-    -- Live preview: show mock healers while options are open
-    frame:SetScript("OnShow", function()
-        if not previewActive then
-            StartPreview();
-        end
-    end);
+    AddCheckbox("showDrinking", "Show Drinking Status",
+        "Show when a healer is drinking to restore mana.");
 
-    frame:SetScript("OnHide", function()
-        if previewActive then
-            StopPreview();
-        end
-    end);
+    AddCheckbox("showInnervate", "Show Innervate",
+        "Show when a healer has Innervate active.");
 
-    -- ESC to close
-    tinsert(UISpecialFrames, "HealerManaOptionsFrame");
+    AddCheckbox("showManaTide", "Show Mana Tide",
+        "Show when a healer is affected by Mana Tide Totem.");
 
-    OptionsFrame = frame;
-    return frame;
+    AddCheckbox("showSoulstone", "Show Soulstone Status",
+        "Show Soulstone indicator on dead healers who have a soulstone buff.");
+
+    AddCheckbox("showSymbolOfHope", "Show Symbol of Hope",
+        "Show when a healer is receiving mana from Symbol of Hope.");
+
+    AddCheckbox("showPotionCooldown", "Show Potion Cooldowns",
+        "Show mana potion cooldown timers.");
+
+    AddCheckbox("showRaidCooldowns", "Show Raid Cooldowns",
+        "Show raid cooldown tracker below healer mana bars.");
+
+    AddCheckbox("shortenedStatus", "Shortened Status Labels",
+        "Use abbreviated labels (e.g. 'Inn' instead of 'Innervate').");
+
+    AddCheckbox("showStatusDuration", "Show Buff Durations",
+        "Show remaining duration on status indicators.");
+
+    -------------------------
+    -- Section: Appearance
+    -------------------------
+    layout:AddInitializer(CreateSettingsListSectionHeaderInitializer("Appearance"));
+
+    AddSlider("fontSize", "Font Size",
+        "Text size for healer names and mana percentages.",
+        8, 24, 1);
+
+    AddSlider("scale", "Scale",
+        "Overall scale of the HealerMana frame.",
+        50, 200, 10,
+        function(value) HealerManaFrame:SetScale(value / 100); end,
+        function(raw) return floor(raw * 100 + 0.5); end,
+        function(value) return value / 100; end);
+
+    AddSlider("bgOpacity", "Display Opacity (%)",
+        "Background opacity of the HealerMana frame.",
+        0, 100, 5,
+        function(value) HealerManaFrame:SetBackdropColor(0, 0, 0, value / 100); end,
+        function(raw) return floor(raw * 100 + 0.5); end,
+        function(value) return value / 100; end);
+
+    -------------------------
+    -- Section: Mana Color Thresholds
+    -------------------------
+    layout:AddInitializer(CreateSettingsListSectionHeaderInitializer("Mana Color Thresholds"));
+
+    AddSlider("colorThresholdGreen", "Green (above %)",
+        "Mana percentage above which the bar shows green.",
+        50, 100, 5);
+
+    AddSlider("colorThresholdYellow", "Yellow (above %)",
+        "Mana percentage above which the bar shows yellow.",
+        25, 75, 5);
+
+    AddSlider("colorThresholdOrange", "Orange (above %)",
+        "Mana percentage above which the bar shows orange.",
+        0, 50, 5);
+
+    -------------------------
+    -- Section: Chat Warnings
+    -------------------------
+    layout:AddInitializer(CreateSettingsListSectionHeaderInitializer("Chat Warnings"));
+
+    local sendWarnInit = AddCheckbox("sendWarnings", "Send Warning Messages",
+        "Send chat warnings when average healer mana drops below thresholds.");
+
+    local soloWarnInit = AddCheckbox("sendWarningsSolo", "Warn When Solo (/say)",
+        "Also send warnings to /say when not in a group (requires Show When Solo).");
+    soloWarnInit:SetParentInitializer(sendWarnInit,
+        function() return db.sendWarnings; end);
+
+    local warnCdInit = AddSlider("warningCooldown", "Warning Cooldown (sec)",
+        "Minimum seconds between warning messages.",
+        10, 120, 5);
+    warnCdInit:SetParentInitializer(sendWarnInit,
+        function() return db.sendWarnings; end);
+
+    local warnThreshInit = AddSlider("warningThreshold", "Warning Threshold (%)",
+        "Send a warning when average healer mana drops below this percentage.",
+        1, 50, 1);
+    warnThreshInit:SetParentInitializer(sendWarnInit,
+        function() return db.sendWarnings; end);
+
+    Settings.RegisterAddOnCategory(category);
+    healerManaCategoryID = category:GetID();
 end
 
 --------------------------------------------------------------------------------
@@ -2295,6 +1999,15 @@ local function OnEvent(self, event, ...)
 
         db = HealerManaDB;
 
+        -- Clean up removed settings
+        db.optionsBgOpacity = nil;
+        db.warningThresholdHigh = nil;
+        db.warningThresholdMed = nil;
+        db.warningThresholdLow = nil;
+
+        -- Register native settings panel
+        RegisterSettings();
+
         -- Apply saved position
         if db.frameX and db.frameY then
             HealerManaFrame:ClearAllPoints();
@@ -2310,7 +2023,7 @@ local function OnEvent(self, event, ...)
         UpdateResizeHandleVisibility();
 
         self:UnregisterEvent("ADDON_LOADED");
-        print("|cff00ff00HealerMana|r loaded. Type |cff00ffff/hm|r for options.");
+        print("|cff00ff00HealerMana|r loaded. Type |cff00ffff/hm|r or visit Options > AddOns.");
 
     elseif event == "PLAYER_LOGIN" then
         if IsInGroup() or db.showSolo then
@@ -2383,20 +2096,20 @@ EventFrame:RegisterEvent("COMBAT_LOG_EVENT_UNFILTERED");
 -- Slash Commands
 --------------------------------------------------------------------------------
 
-local function ToggleOptionsFrame()
-    local frame = CreateOptionsFrame();
-    if frame:IsShown() then
-        frame:Hide();
-    else
-        frame:Show();
+local function OpenOptions()
+    if not previewActive then
+        StartPreview();
     end
+    previewFromSettings = true;
+    HealerManaFrame:SetFrameStrata("TOOLTIP");
+    Settings.OpenToCategory(healerManaCategoryID);
 end
 
 local function SlashCommandHandler(msg)
     msg = msg and msg:lower():trim() or "";
 
     if msg == "" or msg == "options" or msg == "config" then
-        ToggleOptionsFrame();
+        OpenOptions();
 
     elseif msg == "lock" then
         db.locked = not db.locked;
@@ -2410,10 +2123,6 @@ local function SlashCommandHandler(msg)
 
     elseif msg == "test" then
         if previewActive then
-            -- Close options panel first to prevent its OnHide from interfering
-            if OptionsFrame and OptionsFrame:IsShown() then
-                OptionsFrame:Hide();
-            end
             StopPreview();
             print("|cff00ff00HealerMana|r preview stopped.");
         else
@@ -2437,7 +2146,7 @@ local function SlashCommandHandler(msg)
 
     elseif msg == "help" then
         print("|cff00ff00HealerMana|r commands:");
-        print("  |cff00ffff/hm|r - Open options panel");
+        print("  |cff00ffff/hm|r - Open Options > AddOns > HealerMana");
         print("  |cff00ffff/hm lock|r - Toggle frame lock");
         print("  |cff00ffff/hm test|r - Show test healer data");
         print("  |cff00ffff/hm reset|r - Reset to defaults");

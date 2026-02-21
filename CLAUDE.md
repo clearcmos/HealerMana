@@ -6,7 +6,7 @@ HealerMana is a WoW Classic Anniversary Edition addon that tracks healer mana in
 
 ## Architecture
 
-**Single-file addon** — all logic in `HealerMana.lua` (~2460 lines). No XML, no external dependencies.
+**Single-file addon** — all logic in `HealerMana.lua` (~2020 lines). No XML, no external dependencies.
 
 ### Key Systems
 
@@ -17,17 +17,17 @@ HealerMana is a WoW Classic Anniversary Edition addon that tracks healer mana in
 
 2. **Inspection Queue** — async system that queues `NotifyInspect()` calls with 2.5s cooldown, pauses in combat, validates range via `CanInspect()`. Runs on a separate `BackgroundFrame` (always shown) to avoid the hidden-frame OnUpdate deadlock. Periodically re-queues unresolved members.
 
-3. **Raid Cooldown Tracker** — monitors `SPELL_CAST_SUCCESS` in combat log for key raid cooldowns. Class-baseline cooldowns (Innervate, Rebirth, Lay on Hands, Divine Intervention, Bloodlust/Heroism) are pre-seeded as "Ready" on group scan; player talent cooldowns (Mana Tide, Power Infusion) detected via `IsSpellKnown()`. Multi-rank spells use canonical spell IDs for consistent keys. Displays with spell icons, class-colored caster names, and countdown timers (or green "Ready") in a section below healer mana rows.
+3. **Raid Cooldown Tracker** — monitors `SPELL_CAST_SUCCESS` (and `SPELL_AURA_APPLIED` for Soulstone) in combat log for key raid cooldowns. Class-baseline cooldowns (Innervate, Rebirth, Lay on Hands, Divine Intervention, Soulstone, Bloodlust/Heroism) are pre-seeded as "Ready" on group scan; player talent cooldowns (Mana Tide, Power Infusion) detected via `IsSpellKnown()`. Multi-rank spells use canonical spell IDs for consistent keys. Displays with class-colored caster names, spell names, and countdown timers (or green "Ready") in a text-only layout matching the healer rows above.
 
 4. **Display System** — movable, resizable frame with BackdropTemplate, object-pooled row frames per healer (class-colored name + mana % + status indicators). Resize handle appears on hover (checked in display OnUpdate to avoid conflicts with drag OnUpdate), clamped to content-driven minimums.
 
-5. **Options GUI** — Ace3-style widgets (sliders, checkboxes, dropdowns) created in Lua, lazy-loaded on first `/hm` call. Live preview with animated mock data while options are open.
+5. **Options GUI** — uses the native WoW Settings API (`Settings.RegisterVerticalLayoutCategory` + `Settings.RegisterAddOnCategory`) so options appear in the AddOns tab of the built-in Options panel (ESC > Options > AddOns > HealerMana). Proxy settings with get/set callbacks to `db`. `/hm` opens directly to the category.
 
 ### Code Sections (in order)
 
 | Section | Lines (approx) | Description |
 |---------|----------------|-------------|
-| S1      | 1-39           | Header, DEFAULT_SETTINGS |
+| S1      | 1-38           | Header, DEFAULT_SETTINGS |
 | S2      | 41-81          | Local performance caches |
 | S3      | 83-231         | Constants (classes, healing tabs, potions, raid cooldowns, canonical IDs, class/talent mappings) |
 | S4      | 233-285        | State variables |
@@ -45,9 +45,9 @@ HealerMana is a WoW Classic Anniversary Edition addon that tracks healer mana in
 | S16     | 1150-1432      | Display update (healer rows + cooldown rows with Ready state) |
 | S17     | 1434-1520      | OnUpdate handler + BackgroundFrame |
 | S18     | 1522-1647      | Preview system (mock healers + mock cooldowns) |
-| S19     | 1649-2272      | Options GUI |
-| S20     | 2274-2381      | Event handling |
-| S21     | 2383-2459      | Slash commands + init |
+| S19     | 1649-1834      | Options GUI (native Settings API) |
+| S20     | 1836-1949      | Event handling |
+| S21     | 1951-2019      | Slash commands + init |
 
 ## Features
 
@@ -56,13 +56,14 @@ HealerMana is a WoW Classic Anniversary Edition addon that tracks healer mana in
 - Dead/DC detection with grey indicators
 - Status indicators: Drinking, Innervate, Mana Tide Totem (with optional durations)
 - Potion cooldown tracking (2min timer from combat log)
-- Raid cooldown tracking with Ready/on-cooldown states: Innervate, Mana Tide, Bloodlust/Heroism, Power Infusion, Divine Intervention, Rebirth, Lay on Hands
+- Soulstone status indicator on dead healers (purple "SS"/"Soulstone")
+- Raid cooldown tracking with Ready/on-cooldown states: Innervate, Mana Tide, Bloodlust/Heroism, Power Infusion, Divine Intervention, Rebirth, Lay on Hands, Soulstone
 - Average mana across all healers
 - Sort healers by lowest mana or alphabetically
 - Optional chat warnings at configurable thresholds with cooldown
 - Movable, lockable, resizable frame with configurable scale/font/opacity
 - Live preview system with animated mock data
-- Full options GUI via `/hm`
+- Native options panel in AddOns tab (ESC > Options > AddOns > HealerMana, or `/hm`)
 - Show when solo option
 
 ## Development Workflow
@@ -74,6 +75,14 @@ HealerMana is a WoW Classic Anniversary Edition addon that tracks healer mana in
 5. Update version in `.toc` and `CHANGELOG.md`
 6. Commit, tag, push to deploy
 
+### New Feature Checklist
+
+When adding any new trackable feature (buff, cooldown, status indicator, etc.), **always** include all three:
+
+1. **Options GUI toggle** — add a `showFeatureName` entry to `DEFAULT_SETTINGS` and a corresponding checkbox in the appropriate section of `RegisterSettings()`. Gate the display logic behind `db.showFeatureName`.
+2. **Preview system coverage** — add mock data to `PREVIEW_DATA` and/or `StartPreview()` so the feature is visible in `/hm test` and the settings panel preview. If the feature has a timer, add it to the OnUpdate preview loop logic.
+3. **Feature list consistency** — update the Features section in both `CLAUDE.md` and `README.md` to mention the new feature.
+
 ## Key APIs Used
 
 - `C_SpecializationInfo.GetSpecializationInfo(i, isInspect, isPet, target, sex, group)` — returns `pointsSpent` per talent tree; `role` field is nil in Classic Anniversary so we fall back to `HEALING_TALENT_TABS` mapping
@@ -84,3 +93,4 @@ HealerMana is a WoW Classic Anniversary Edition addon that tracks healer mana in
 - `UnitBuff(unit, index)` — buff scanning
 - `GetPlayerInfoByGUID(guid)` — class lookup for cooldown casters
 - `IsSpellKnown(spellId)` — player talent cooldown detection
+- `Settings.RegisterVerticalLayoutCategory()` / `Settings.RegisterAddOnCategory()` / `Settings.RegisterProxySetting()` / `Settings.OpenToCategory()` — native options panel
