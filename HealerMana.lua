@@ -40,8 +40,8 @@ local DEFAULT_SETTINGS = {
     cdFrameY = nil,
     cdFrameWidth = nil,
     cdFrameHeight = nil,
-    statusIcons = false,
-    cooldownIcons = false,
+    statusIcons = true,
+    cooldownIcons = true,
     iconSize = 16,
     showRowHighlight = true,
     enableCdRequest = true,
@@ -59,7 +59,6 @@ local tinsert = table.insert;
 local tremove = table.remove;
 local wipe = table.wipe;
 local sort = sort;
-local concat = table.concat;
 local format = string.format;
 local floor = math.floor;
 local sin = sin;
@@ -80,7 +79,6 @@ local UnitBuff = UnitBuff;
 local IsInRaid = IsInRaid;
 local IsInGroup = IsInGroup;
 local GetNumGroupMembers = GetNumGroupMembers;
-local InCombatLockdown = InCombatLockdown;
 local CombatLogGetCurrentEventInfo = CombatLogGetCurrentEventInfo;
 local SendChatMessage = SendChatMessage;
 local NotifyInspect = NotifyInspect;
@@ -361,7 +359,6 @@ local inspectElapsed = 0;
 
 -- Preview state
 local previewActive = false;
-local previewHealers = {};
 local savedHealers = nil;
 
 -- Forward declarations
@@ -1080,15 +1077,6 @@ local function UpdateAllHealerBuffs()
 end
 
 --------------------------------------------------------------------------------
--- Raid Cooldown Cleanup
---------------------------------------------------------------------------------
-
-local function CleanExpiredCooldowns()
-    -- No-op: keep expired entries so they show as "Ready"
-    -- Entries are removed only when the caster leaves the group (ScanGroupComposition)
-end
-
---------------------------------------------------------------------------------
 -- Potion Tracking via Combat Log
 --------------------------------------------------------------------------------
 
@@ -1249,8 +1237,7 @@ HealerManaFrame:SetScript("OnDragStop", function(self)
     end
 end);
 
--- Resize handle (disabled — dynamic auto-sizing makes manual resize unnecessary)
--- Kept for potential experimental testing later.
+-- Resize handle (appears on hover when unlocked)
 local resizeHandle = CreateFrame("Button", nil, HealerManaFrame);
 resizeHandle:SetSize(16, 16);
 resizeHandle:SetPoint("BOTTOMRIGHT", 0, 0);
@@ -1362,8 +1349,7 @@ CooldownFrame:SetScript("OnDragStop", function(self)
     end
 end);
 
--- Resize handle for cooldown frame (disabled — dynamic auto-sizing makes manual resize unnecessary)
--- Kept for potential experimental testing later.
+-- Resize handle for cooldown frame (appears on hover when unlocked)
 local cdResizeHandle = CreateFrame("Button", nil, CooldownFrame);
 cdResizeHandle:SetSize(16, 16);
 cdResizeHandle:SetPoint("BOTTOMRIGHT", 0, 0);
@@ -1429,15 +1415,22 @@ local function CreateRowFrame()
     frame:RegisterForClicks("AnyDown");
     frame:Hide();
 
-    -- Built-in highlight (Button handles show/hide automatically on enter/leave)
+    -- Row highlight (gated on db.showRowHighlight)
     local hl = frame:CreateTexture(nil, "BACKGROUND");
     hl:SetAllPoints();
     hl:SetColorTexture(1, 1, 1, 0.1);
-    frame:SetHighlightTexture(hl);
+    hl:Hide();
     frame.highlight = hl;
 
+    frame:SetScript("OnEnter", function(self)
+        if db and db.showRowHighlight then self.highlight:Show(); end
+    end);
+    frame:SetScript("OnLeave", function(self)
+        self.highlight:Hide();
+    end);
+
     frame:SetScript("OnClick", function(self, button)
-        if button == "LeftButton" and db and db.enableCdRequest and db.locked and self.healerGUID then
+        if button == "LeftButton" and db and db.enableCdRequest and self.healerGUID then
             ShowCooldownRequestMenu(self);
         end
     end);
@@ -1503,16 +1496,23 @@ local function CreateCdRowFrame()
     frame:RegisterForClicks("AnyDown");
     frame:Hide();
 
-    -- Built-in highlight (Button handles show/hide automatically on enter/leave)
+    -- Row highlight (gated on db.showRowHighlight)
     local hl = frame:CreateTexture(nil, "BACKGROUND");
     hl:SetAllPoints();
     hl:SetColorTexture(1, 1, 1, 0.1);
-    frame:SetHighlightTexture(hl);
+    hl:Hide();
     frame.highlight = hl;
+
+    frame:SetScript("OnEnter", function(self)
+        if db and db.showRowHighlight then self.highlight:Show(); end
+    end);
+    frame:SetScript("OnLeave", function(self)
+        self.highlight:Hide();
+    end);
 
     -- Click handler for cooldown requests
     frame:SetScript("OnClick", function(self, button)
-        if button == "LeftButton" and db and db.enableCdRequest and (db.locked or previewActive) and self.spellId then
+        if button == "LeftButton" and db and db.enableCdRequest and self.spellId then
             ShowCdRowRequestMenu(self);
         end
     end);
@@ -1575,7 +1575,7 @@ local CD_REQUEST_CONFIG = {
     [BLOODLUST_SPELL_ID]        = { type = "cast" },
     [HEROISM_SPELL_ID]          = { type = "cast" },
     [SHIELD_WALL_SPELL_ID]      = { type = "cast" },
-    [INNERVATE_SPELL_ID]        = { type = "target", filter = "low_mana",  threshold = 20 },
+    [INNERVATE_SPELL_ID]        = { type = "target", filter = "low_mana",  threshold = 30 },
     [633]                       = { type = "target", filter = "low_health", threshold = 20 },  -- Lay on Hands
     [POWER_INFUSION_SPELL_ID]   = { type = "target", filter = "dps_mana" },
     [20484]                     = { type = "target", filter = "dead" },                         -- Rebirth
@@ -2716,7 +2716,6 @@ BackgroundFrame:SetScript("OnUpdate", function(self, elapsed)
         else
             UpdateManaValues();
             UpdateAllHealerBuffs();
-            CleanExpiredCooldowns();
             CheckManaWarnings();
         end
 
@@ -3066,7 +3065,7 @@ local function RegisterSettings()
         "Highlight rows on mouse hover for visual feedback.");
 
     AddCheckbox("enableCdRequest", "Click-to-Request Cooldowns",
-        "Click a healer row (when locked) to whisper a caster for a cooldown.");
+        "Click a healer or cooldown row to whisper a caster requesting a cooldown.");
 
     -------------------------
     -- Section: Appearance
