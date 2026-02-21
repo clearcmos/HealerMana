@@ -39,7 +39,7 @@ local DEFAULT_SETTINGS = {
     cdFrameWidth = nil,
     cdFrameHeight = nil,
     statusIcons = true,
-    cooldownIcons = true,
+    cooldownIcons = false,
     iconSize = 16,
     showRowHighlight = true,
     enableCdRequest = true,
@@ -2347,7 +2347,7 @@ local function RenderHealerRows(targetFrame, yOffset, totalWidth, maxNameWidth, 
         row.manaText:SetWidth(maxManaWidth);
 
         row.manaText:ClearAllPoints();
-        row.manaText:SetPoint("LEFT", row.nameText, "RIGHT", COL_GAP, 0);
+        row.manaText:SetPoint("LEFT", row.nameText, "RIGHT", 0, 0);
 
         local cr, cg, cb = GetClassColor(data.classFile);
         row.nameText:SetText(data.name);
@@ -2376,7 +2376,8 @@ local function RenderHealerRows(targetFrame, yOffset, totalWidth, maxNameWidth, 
                     slot.icon:ClearAllPoints();
                     slot.icon:SetSize(iconSize, iconSize);
                     slot.icon:SetTexture(iconData[i].icon);
-                    slot.icon:SetPoint("LEFT", prevAnchor, prevPoint, COL_GAP, 0);
+                    local gap = (prevAnchor == row.manaText) and (COL_GAP + 3) or COL_GAP;
+                    slot.icon:SetPoint("LEFT", prevAnchor, prevPoint, gap, 0);
                     slot.icon:Show();
 
                     if iconData[i].duration ~= "" then
@@ -2409,7 +2410,7 @@ local function RenderHealerRows(targetFrame, yOffset, totalWidth, maxNameWidth, 
             row.durationText:SetFont(FONT_PATH, db.fontSize - 1, "OUTLINE");
             row.statusText:SetWidth(maxStatusLabelWidth);
             row.statusText:ClearAllPoints();
-            row.statusText:SetPoint("LEFT", row.manaText, "RIGHT", COL_GAP, 0);
+            row.statusText:SetPoint("LEFT", row.manaText, "RIGHT", COL_GAP + 3, 0);
             row.durationText:ClearAllPoints();
             row.durationText:SetPoint("LEFT", row.statusText, "RIGHT", COL_GAP, 0);
             row.statusText:SetText(rd.statusLabel);
