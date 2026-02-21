@@ -43,6 +43,8 @@ local DEFAULT_SETTINGS = {
     statusIcons = false,
     cooldownIcons = false,
     iconSize = 16,
+    showRowHighlight = true,
+    enableCdRequest = true,
 };
 
 --------------------------------------------------------------------------------
@@ -318,8 +320,7 @@ local inspectRetries = {};       -- guid -> attempt count
 local INSPECT_MAX_RETRIES = 3;
 local INSPECT_REQUEUE_INTERVAL = 5.0;
 
--- Row frame pool
-local rowPool = {};
+-- Persistent healer row frames (never recycled)
 local activeRows = {};
 
 -- Reusable table caches (avoid per-frame allocations)
@@ -332,9 +333,16 @@ local statusIconParts = {};
 -- Raid cooldown tracking
 local raidCooldowns = {};
 local sortedCooldownCache = {};
-local cdRowPool = {};
 local activeCdRows = {};
 local savedRaidCooldowns = nil;
+
+-- Subgroup tracking: guid -> subgroup number (1-8)
+local memberSubgroups = {};
+local savedMemberSubgroups = nil;
+
+-- Context menu state
+local contextMenuFrame;
+local contextMenuVisible = false;
 
 -- Cooldown frame state
 local cdContentMinWidth = 120;
@@ -362,6 +370,9 @@ local ScanGroupComposition;
 local StartPreview;
 local StopPreview;
 local UpdateCdResizeHandleVisibility;
+local HideContextMenu;
+local ShowCooldownRequestMenu;
+local ShowCdRowRequestMenu;
 
 --------------------------------------------------------------------------------
 -- Utility Functions
@@ -775,12 +786,24 @@ ScanGroupComposition = function()
         if guid then
             seenGUIDs[guid] = true;
 
+            -- Track subgroup for cooldown scope checks
+            if IsInRaid() then
+                local raidIndex = tonumber(unit:match("(%d+)$"));
+                if raidIndex then
+                    local _, _, subgroup = GetRaidRosterInfo(raidIndex);
+                    memberSubgroups[guid] = subgroup or 1;
+                end
+            else
+                memberSubgroups[guid] = 1;
+            end
+
             local isCapable, classFile = IsHealerCapableClass(unit);
             local name = UnitName(unit);
             local assignedHealer = (UnitGroupRolesAssigned(unit) == "HEALER");
 
             if not healers[guid] then
                 healers[guid] = {
+                    guid = guid,
                     unit = unit,
                     name = name or "Unknown",
                     classFile = classFile or "UNKNOWN",
@@ -831,6 +854,11 @@ ScanGroupComposition = function()
         if not seenGUIDs[guid] then
             healers[guid] = nil;
             inspectRetries[guid] = nil;
+        end
+    end
+    for guid in pairs(memberSubgroups) do
+        if not seenGUIDs[guid] then
+            memberSubgroups[guid] = nil;
         end
     end
 
@@ -1193,7 +1221,7 @@ HealerManaFrame.separator:Hide();
 -- Cooldown section title (merged mode)
 HealerManaFrame.cdTitle = HealerManaFrame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall");
 HealerManaFrame.cdTitle:SetJustifyH("LEFT");
-HealerManaFrame.cdTitle:SetText("Raid Cooldowns");
+HealerManaFrame.cdTitle:SetText("Cooldowns");
 HealerManaFrame.cdTitle:Hide();
 
 -- Separator line above cooldown section
@@ -1308,7 +1336,7 @@ CooldownFrame:Hide();
 CooldownFrame.title = CooldownFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall");
 CooldownFrame.title:SetPoint("TOPLEFT", 10, -8);
 CooldownFrame.title:SetJustifyH("LEFT");
-CooldownFrame.title:SetText("Raid Cooldowns");
+CooldownFrame.title:SetText("Cooldowns");
 
 -- Separator line below header
 CooldownFrame.separator = CooldownFrame:CreateTexture(nil, "ARTWORK");
@@ -1396,9 +1424,23 @@ cdResizeHandle:SetScript("OnLeave", function() UpdateCdResizeHandleVisibility();
 --------------------------------------------------------------------------------
 
 local function CreateRowFrame()
-    local frame = CreateFrame("Frame", nil, UIParent);
+    local frame = CreateFrame("Button", nil, HealerManaFrame);
     frame:SetSize(400, 16);
+    frame:RegisterForClicks("AnyDown");
     frame:Hide();
+
+    -- Built-in highlight (Button handles show/hide automatically on enter/leave)
+    local hl = frame:CreateTexture(nil, "BACKGROUND");
+    hl:SetAllPoints();
+    hl:SetColorTexture(1, 1, 1, 0.1);
+    frame:SetHighlightTexture(hl);
+    frame.highlight = hl;
+
+    frame:SetScript("OnClick", function(self, button)
+        if button == "LeftButton" and db and db.enableCdRequest and db.locked and self.healerGUID then
+            ShowCooldownRequestMenu(self);
+        end
+    end);
 
     -- Name: class-colored, left-aligned
     frame.nameText = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall");
@@ -1433,36 +1475,47 @@ local function CreateRowFrame()
     return frame;
 end
 
-local function AcquireRow()
-    local frame = tremove(rowPool) or CreateRowFrame();
-    frame:SetParent(HealerManaFrame);
-    return frame;
+-- Persistent row frames (never recycled — Blizzard pattern: reuse in place)
+local MAX_HEALER_ROWS = 10;
+for i = 1, MAX_HEALER_ROWS do
+    activeRows[i] = CreateRowFrame();
 end
 
-local function ReleaseRow(frame)
-    frame:Hide();
-    frame:ClearAllPoints();
-    for i = 1, 4 do
-        frame.statusIcons[i].icon:Hide();
-        frame.statusIcons[i].dur:Hide();
-    end
-    tinsert(rowPool, frame);
-end
-
-local function ReleaseAllRows()
-    for i = #activeRows, 1, -1 do
-        ReleaseRow(tremove(activeRows, i));
+local function HideAllRows()
+    for i = 1, #activeRows do
+        activeRows[i]:Hide();
+        activeRows[i].healerGUID = nil;
+        activeRows[i].healerName = nil;
+        for j = 1, 4 do
+            activeRows[i].statusIcons[j].icon:Hide();
+            activeRows[i].statusIcons[j].dur:Hide();
+        end
     end
 end
 
 --------------------------------------------------------------------------------
--- Cooldown Row Frame Pool
+-- Cooldown Row Frames (persistent, like healer rows)
 --------------------------------------------------------------------------------
 
 local function CreateCdRowFrame()
-    local frame = CreateFrame("Frame", nil, UIParent);
+    local frame = CreateFrame("Button", nil, CooldownFrame);
     frame:SetSize(400, 16);
+    frame:RegisterForClicks("AnyDown");
     frame:Hide();
+
+    -- Built-in highlight (Button handles show/hide automatically on enter/leave)
+    local hl = frame:CreateTexture(nil, "BACKGROUND");
+    hl:SetAllPoints();
+    hl:SetColorTexture(1, 1, 1, 0.1);
+    frame:SetHighlightTexture(hl);
+    frame.highlight = hl;
+
+    -- Click handler for cooldown requests
+    frame:SetScript("OnClick", function(self, button)
+        if button == "LeftButton" and db and db.enableCdRequest and (db.locked or previewActive) and self.spellId then
+            ShowCdRowRequestMenu(self);
+        end
+    end);
 
     -- Caster name (class-colored, left-aligned)
     frame.nameText = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall");
@@ -1486,27 +1539,499 @@ local function CreateCdRowFrame()
     return frame;
 end
 
-local function AcquireCdRow()
-    local frame = tremove(cdRowPool) or CreateCdRowFrame();
-    if db.splitFrames then
-        frame:SetParent(CooldownFrame);
+-- Persistent cd row frames (never recycled — reused in place like healer rows)
+local MAX_CD_ROWS = 25;
+for i = 1, MAX_CD_ROWS do
+    activeCdRows[i] = CreateCdRowFrame();
+end
+
+local function HideAllCdRows()
+    for i = 1, #activeCdRows do
+        activeCdRows[i]:Hide();
+        activeCdRows[i].sourceGUID = nil;
+        activeCdRows[i].spellId = nil;
+        activeCdRows[i].casterName = nil;
+        activeCdRows[i].classFile = nil;
+        activeCdRows[i].spellName = nil;
+        activeCdRows[i].cdIcon = nil;
+        activeCdRows[i].expiryTime = nil;
+        activeCdRows[i].spellIcon:Hide();
+    end
+end
+
+--------------------------------------------------------------------------------
+-- Cooldown Request Menu
+--------------------------------------------------------------------------------
+
+-- Which cooldowns can be requested via click-to-whisper
+local REQUESTABLE_SPELLS = {
+    [INNERVATE_SPELL_ID] = { scope = "raid" },
+    [20707] = { scope = "dead" },  -- Soulstone (canonical ID)
+    [20484] = { scope = "dead" },  -- Rebirth (canonical ID)
+};
+
+-- Per-spell behavior when a cooldown row is clicked
+local CD_REQUEST_CONFIG = {
+    [BLOODLUST_SPELL_ID]        = { type = "cast" },
+    [HEROISM_SPELL_ID]          = { type = "cast" },
+    [SHIELD_WALL_SPELL_ID]      = { type = "cast" },
+    [INNERVATE_SPELL_ID]        = { type = "target", filter = "low_mana",  threshold = 20 },
+    [633]                       = { type = "target", filter = "low_health", threshold = 20 },  -- Lay on Hands
+    [POWER_INFUSION_SPELL_ID]   = { type = "target", filter = "dps_mana" },
+    [20484]                     = { type = "target", filter = "dead" },                         -- Rebirth
+    [20707]                     = { type = "target", filter = "alive_no_soulstone" },             -- Soulstone
+    [MANA_TIDE_CAST_SPELL_ID]   = { type = "conditional_cast", condition = "subgroup_low_mana", threshold = 20 },
+    [SYMBOL_OF_HOPE_SPELL_ID]   = { type = "conditional_cast", condition = "subgroup_low_mana", threshold = 20 },
+};
+
+-- Check if any healer in the caster's subgroup has mana <= threshold% (excluding caster)
+local function HasLowManaHealerInSubgroup(casterGUID, threshold)
+    local casterSubgroup = memberSubgroups[casterGUID];
+    if not casterSubgroup then return false; end
+
+    for guid, data in pairs(healers) do
+        if guid ~= casterGUID and data.manaPercent >= 0 and data.manaPercent <= threshold then
+            local subgroup = memberSubgroups[guid];
+            if subgroup and subgroup == casterSubgroup then
+                return true;
+            end
+        end
+    end
+    return false;
+end
+
+-- Scan group members for valid targets based on filter type
+local function ScanGroupTargets(filter, threshold, casterGUID)
+    local results = {};
+
+    if previewActive then
+        -- Preview mode: bypass thresholds so all targets are always clickable
+        for guid, data in pairs(healers) do
+            if guid ~= casterGUID then
+                if filter == "low_mana" then
+                    if data.manaPercent >= 0 then
+                        tinsert(results, { name = data.name, guid = guid, classFile = data.classFile,
+                            info = format("%d%% mana", data.manaPercent) });
+                    end
+                elseif filter == "low_health" then
+                    if data.manaPercent >= 0 then
+                        tinsert(results, { name = data.name, guid = guid, classFile = data.classFile,
+                            info = format("%d%% health", data.manaPercent) });
+                    end
+                elseif filter == "dead" then
+                    if data.manaPercent == -2 then
+                        tinsert(results, { name = data.name, guid = guid, classFile = data.classFile,
+                            info = "Dead" });
+                    end
+                elseif filter == "alive_no_soulstone" then
+                    if data.manaPercent >= 0 then
+                        tinsert(results, { name = data.name, guid = guid, classFile = data.classFile,
+                            info = format("%d%% mana", data.manaPercent) });
+                    end
+                elseif filter == "dps_mana" then
+                    if data.classFile == "SHAMAN" then
+                        tinsert(results, { name = data.name, guid = guid, classFile = data.classFile,
+                            info = "DPS" });
+                    end
+                end
+            end
+        end
     else
-        frame:SetParent(HealerManaFrame);
+        -- Live mode: scan actual group members
+        local units = IterateGroupMembers();
+        for _, unit in ipairs(units) do
+            local guid = UnitGUID(unit);
+            if guid and guid ~= casterGUID then
+                local name = UnitName(unit);
+                local _, classFile = UnitClass(unit);
+                if filter == "low_mana" then
+                    local powerType = UnitPowerType(unit);
+                    if powerType == POWER_TYPE_MANA then
+                        local maxPower = UnitPowerMax(unit);
+                        if maxPower > 0 then
+                            local pct = floor(UnitPower(unit) / maxPower * 100);
+                            if pct <= threshold then
+                                tinsert(results, { name = name, guid = guid, classFile = classFile,
+                                    info = format("%d%% mana", pct) });
+                            end
+                        end
+                    end
+                elseif filter == "low_health" then
+                    if not UnitIsDeadOrGhost(unit) then
+                        local maxHP = UnitHealthMax(unit);
+                        if maxHP > 0 then
+                            local pct = floor(UnitHealth(unit) / maxHP * 100);
+                            if pct <= threshold then
+                                tinsert(results, { name = name, guid = guid, classFile = classFile,
+                                    info = format("%d%% health", pct) });
+                            end
+                        end
+                    end
+                elseif filter == "dead" then
+                    if UnitIsDeadOrGhost(unit) then
+                        local healerData = healers[guid];
+                        if not healerData or not healerData.hasSoulstone then
+                            tinsert(results, { name = name, guid = guid, classFile = classFile,
+                                info = "Dead" });
+                        end
+                    end
+                elseif filter == "alive_no_soulstone" then
+                    if not UnitIsDeadOrGhost(unit) then
+                        local healerData = healers[guid];
+                        if not healerData or not healerData.hasSoulstone then
+                            tinsert(results, { name = name, guid = guid, classFile = classFile,
+                                info = format("%s", classFile and classFile or "") });
+                        end
+                    end
+                elseif filter == "dps_mana" then
+                    local powerType = UnitPowerType(unit);
+                    if powerType == POWER_TYPE_MANA and not healers[guid] then
+                        tinsert(results, { name = name, guid = guid, classFile = classFile,
+                            info = "DPS" });
+                    end
+                end
+            end
+        end
     end
-    return frame;
+
+    sort(results, function(a, b) return a.name < b.name; end);
+    return results;
 end
 
-local function ReleaseCdRow(frame)
-    frame:Hide();
-    frame:ClearAllPoints();
-    frame.spellIcon:Hide();
-    tinsert(cdRowPool, frame);
+local MENU_ITEM_HEIGHT = 20;
+local MENU_PADDING = 4;
+local MENU_ICON_SIZE = 16;
+
+local function GetEligibleCasters(healerGUID)
+    local results = {};
+    local healerData = healers[healerGUID];
+    if not healerData then return results; end
+
+    local healerSubgroup = memberSubgroups[healerGUID];
+    local now = GetTime();
+
+    for _, entry in pairs(raidCooldowns) do
+        local spellConfig = REQUESTABLE_SPELLS[entry.spellId];
+        if spellConfig and entry.expiryTime <= now then
+            local eligible = false;
+            if previewActive then
+                -- Preview mode: show all ready requestable cooldowns for testing
+                eligible = true;
+            elseif entry.sourceGUID ~= healerGUID then
+                if spellConfig.scope == "raid" then
+                    eligible = (healerData.manaPercent >= 0);
+                elseif spellConfig.scope == "subgroup" then
+                    if healerData.manaPercent >= 0 then
+                        local casterSubgroup = memberSubgroups[entry.sourceGUID];
+                        eligible = (casterSubgroup and healerSubgroup and casterSubgroup == healerSubgroup);
+                    end
+                elseif spellConfig.scope == "dead" then
+                    eligible = (healerData.manaPercent == -2);
+                end
+            end
+
+            if eligible then
+                tinsert(results, {
+                    casterName = entry.name,
+                    casterGUID = entry.sourceGUID,
+                    spellName = entry.spellName,
+                    spellId = entry.spellId,
+                    icon = entry.icon,
+                    classFile = entry.classFile,
+                });
+            end
+        end
+    end
+
+    sort(results, function(a, b)
+        if a.spellName == b.spellName then return a.casterName < b.casterName; end
+        return a.spellName < b.spellName;
+    end);
+
+    return results;
 end
 
-local function ReleaseAllCdRows()
-    for i = #activeCdRows, 1, -1 do
-        ReleaseCdRow(tremove(activeCdRows, i));
+local function CreateContextMenu()
+    local menu = CreateFrame("Frame", nil, UIParent, "BackdropTemplate");
+    menu:SetFrameStrata("TOOLTIP");
+    menu:SetFrameLevel(100);
+    menu:SetBackdrop({
+        bgFile = "Interface\\ChatFrame\\ChatFrameBackground",
+        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+        tile = true, tileSize = 16, edgeSize = 12,
+        insets = { left = 2, right = 2, top = 2, bottom = 2 },
+    });
+    menu:SetBackdropColor(0.1, 0.1, 0.1, 0.95);
+    menu:SetBackdropBorderColor(0.4, 0.4, 0.4, 0.8);
+    menu:SetClampedToScreen(true);
+    menu:EnableMouse(false);
+    menu:Hide();
+
+    -- Dismiss on click-outside via GLOBAL_MOUSE_DOWN (standard WoW dropdown pattern)
+    menu:SetScript("OnEvent", function(self, event)
+        if event == "GLOBAL_MOUSE_DOWN" then
+            -- Check if click was on the menu or any of its children
+            local mouseFoci = GetMouseFoci();
+            for _, focus in ipairs(mouseFoci) do
+                local f = focus;
+                while f do
+                    if f == self then return; end
+                    f = f:GetParent();
+                end
+            end
+            HideContextMenu();
+        end
+    end);
+
+    menu.items = {};
+    return menu;
+end
+
+local function CreateMenuItem(menu)
+    local item = CreateFrame("Frame", nil, menu);
+    item:SetHeight(MENU_ITEM_HEIGHT);
+
+    item.highlight = item:CreateTexture(nil, "BACKGROUND");
+    item.highlight:SetAllPoints();
+    item.highlight:SetColorTexture(1, 1, 1, 0.15);
+    item.highlight:Hide();
+
+    item.icon = item:CreateTexture(nil, "ARTWORK");
+    item.icon:SetSize(MENU_ICON_SIZE, MENU_ICON_SIZE);
+    item.icon:SetPoint("LEFT", MENU_PADDING, 0);
+
+    item.text = item:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall");
+    item.text:SetPoint("LEFT", item.icon, "RIGHT", 4, 0);
+    item.text:SetJustifyH("LEFT");
+
+    item:EnableMouse(true);
+    item:SetScript("OnEnter", function(self) self.highlight:Show(); end);
+    item:SetScript("OnLeave", function(self) self.highlight:Hide(); end);
+
+    return item;
+end
+
+HideContextMenu = function()
+    if contextMenuFrame then
+        contextMenuFrame:Hide();
+        contextMenuFrame:UnregisterEvent("GLOBAL_MOUSE_DOWN");
     end
+    contextMenuVisible = false;
+end
+
+ShowCooldownRequestMenu = function(rowFrame)
+    local healerGUID = rowFrame.healerGUID;
+    local healerName = rowFrame.healerName;
+    if not healerGUID or not healerName then return; end
+
+    -- Toggle off if clicking same row
+    if contextMenuVisible and contextMenuFrame and contextMenuFrame.targetGUID == healerGUID then
+        HideContextMenu();
+        return;
+    end
+
+    local eligible = GetEligibleCasters(healerGUID);
+    if #eligible == 0 then
+        HideContextMenu();
+        return;
+    end
+
+    if not contextMenuFrame then
+        contextMenuFrame = CreateContextMenu();
+    end
+
+    -- Hide existing items
+    for _, item in ipairs(contextMenuFrame.items) do
+        item:Hide();
+    end
+
+    local healerData = healers[healerGUID];
+    local manaStr = "";
+    if healerData then
+        if healerData.manaPercent == -2 then
+            manaStr = "Dead";
+        elseif healerData.manaPercent >= 0 then
+            manaStr = format("%d%% mana", healerData.manaPercent);
+        end
+    end
+
+    local maxWidth = 0;
+    for i, entry in ipairs(eligible) do
+        local item = contextMenuFrame.items[i];
+        if not item then
+            item = CreateMenuItem(contextMenuFrame);
+            contextMenuFrame.items[i] = item;
+        end
+
+        local cr, cg, cb = GetClassColor(entry.classFile);
+        local displayText = format("|cff%02x%02x%02x%s|r - %s",
+            cr * 255, cg * 255, cb * 255, entry.casterName, entry.spellName);
+        item.text:SetText(displayText);
+        item.icon:SetTexture(entry.icon);
+
+        item:ClearAllPoints();
+        item:SetPoint("TOPLEFT", contextMenuFrame, "TOPLEFT", MENU_PADDING, -(MENU_PADDING + (i - 1) * MENU_ITEM_HEIGHT));
+        item:SetPoint("RIGHT", contextMenuFrame, "RIGHT", -MENU_PADDING, 0);
+
+        -- Store data for click handler
+        item.casterName = entry.casterName;
+        item.spellName = entry.spellName;
+        item.healerName = healerName;
+        item.manaStr = manaStr;
+
+        item:SetScript("OnMouseUp", function(self, button)
+            if button ~= "LeftButton" then return; end
+            local msg = format("[HM] %s needs %s (%s)", self.healerName, self.spellName, self.manaStr);
+            local recipient = previewActive and UnitName("player") or self.casterName;
+            SendChatMessage(msg, "WHISPER", nil, recipient);
+            HideContextMenu();
+        end);
+
+        item:Show();
+
+        -- Measure width
+        local textWidth = item.text:GetStringWidth();
+        local itemWidth = MENU_PADDING + MENU_ICON_SIZE + 4 + textWidth + MENU_PADDING;
+        if itemWidth > maxWidth then maxWidth = itemWidth; end
+    end
+
+    local menuWidth = max(maxWidth + MENU_PADDING * 2, 120);
+    local menuHeight = MENU_PADDING * 2 + #eligible * MENU_ITEM_HEIGHT;
+    contextMenuFrame:SetSize(menuWidth, menuHeight);
+
+    -- Anchor near the cursor
+    local cursorX, cursorY = GetCursorPosition();
+    local menuScale = contextMenuFrame:GetEffectiveScale();
+    contextMenuFrame:ClearAllPoints();
+    contextMenuFrame:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT", cursorX / menuScale + 4, cursorY / menuScale + 4);
+    contextMenuFrame.targetGUID = healerGUID;
+    contextMenuFrame.targetSpellId = nil;
+    contextMenuFrame:Show();
+    contextMenuFrame:RegisterEvent("GLOBAL_MOUSE_DOWN");
+    contextMenuVisible = true;
+end
+
+ShowCdRowRequestMenu = function(cdRow)
+    local spellId = cdRow.spellId;
+    local casterName = cdRow.casterName;
+    local sourceGUID = cdRow.sourceGUID;
+    if not spellId or not casterName then return; end
+
+    -- Toggle off if clicking same row
+    if contextMenuVisible and contextMenuFrame and contextMenuFrame.targetGUID == sourceGUID
+       and contextMenuFrame.targetSpellId == spellId then
+        HideContextMenu();
+        return;
+    end
+
+    -- Only show menu for ready cooldowns (skip in preview mode)
+    local now = GetTime();
+    if not previewActive and cdRow.expiryTime and cdRow.expiryTime > now then return; end
+
+    local config = CD_REQUEST_CONFIG[spellId];
+    if not config then return; end
+
+    -- Build menu entries (preview mode bypasses all conditions)
+    local entries = {};
+
+    if config.type == "cast" or (previewActive and config.type == "conditional_cast") then
+        tinsert(entries, {
+            icon = cdRow.cdIcon,
+            text = cdRow.spellName,
+            whisper = format("[HM] Cast %s please", cdRow.spellName),
+        });
+    elseif config.type == "conditional_cast" then
+        if config.condition == "subgroup_low_mana" then
+            if not HasLowManaHealerInSubgroup(sourceGUID, config.threshold or 20) then
+                HideContextMenu();
+                return;
+            end
+        end
+        tinsert(entries, {
+            icon = cdRow.cdIcon,
+            text = cdRow.spellName,
+            whisper = format("[HM] Cast %s please", cdRow.spellName),
+        });
+    elseif config.type == "target" then
+        local targets = ScanGroupTargets(config.filter, config.threshold or 20, sourceGUID);
+        if #targets == 0 then
+            HideContextMenu();
+            return;
+        end
+        for _, t in ipairs(targets) do
+            local cr, cg, cb = GetClassColor(t.classFile);
+            local coloredName = format("|cff%02x%02x%02x%s|r", cr * 255, cg * 255, cb * 255, t.name);
+            tinsert(entries, {
+                icon = cdRow.cdIcon,
+                text = format("%s - %s (%s)", cdRow.spellName, coloredName, t.info),
+                whisper = format("[HM] Cast %s on %s (%s)", cdRow.spellName, t.name, t.info),
+                targetName = t.name,
+            });
+        end
+    end
+
+    if #entries == 0 then
+        HideContextMenu();
+        return;
+    end
+
+    if not contextMenuFrame then
+        contextMenuFrame = CreateContextMenu();
+    end
+
+    -- Hide existing items
+    for _, item in ipairs(contextMenuFrame.items) do
+        item:Hide();
+    end
+
+    local maxWidth = 0;
+    for i, entry in ipairs(entries) do
+        local item = contextMenuFrame.items[i];
+        if not item then
+            item = CreateMenuItem(contextMenuFrame);
+            contextMenuFrame.items[i] = item;
+        end
+
+        item.text:SetText(entry.text);
+        item.icon:SetTexture(entry.icon);
+
+        item:ClearAllPoints();
+        item:SetPoint("TOPLEFT", contextMenuFrame, "TOPLEFT", MENU_PADDING, -(MENU_PADDING + (i - 1) * MENU_ITEM_HEIGHT));
+        item:SetPoint("RIGHT", contextMenuFrame, "RIGHT", -MENU_PADDING, 0);
+
+        -- Store data for click handler
+        item.casterName = casterName;
+        item.whisperMsg = entry.whisper;
+
+        item:SetScript("OnMouseUp", function(self, button)
+            if button ~= "LeftButton" then return; end
+            local recipient = previewActive and UnitName("player") or self.casterName;
+            SendChatMessage(self.whisperMsg, "WHISPER", nil, recipient);
+            HideContextMenu();
+        end);
+
+        item:Show();
+
+        -- Measure width
+        local textWidth = item.text:GetStringWidth();
+        local itemWidth = MENU_PADDING + MENU_ICON_SIZE + 4 + textWidth + MENU_PADDING;
+        if itemWidth > maxWidth then maxWidth = itemWidth; end
+    end
+
+    local menuWidth = max(maxWidth + MENU_PADDING * 2, 120);
+    local menuHeight = MENU_PADDING * 2 + #entries * MENU_ITEM_HEIGHT;
+    contextMenuFrame:SetSize(menuWidth, menuHeight);
+
+    -- Anchor near the cursor
+    local cursorX, cursorY = GetCursorPosition();
+    local menuScale = contextMenuFrame:GetEffectiveScale();
+    contextMenuFrame:ClearAllPoints();
+    contextMenuFrame:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT", cursorX / menuScale + 4, cursorY / menuScale + 4);
+    contextMenuFrame.targetGUID = sourceGUID;
+    contextMenuFrame.targetSpellId = spellId;
+    contextMenuFrame:Show();
+    contextMenuFrame:RegisterEvent("GLOBAL_MOUSE_DOWN");
+    contextMenuVisible = true;
 end
 
 --------------------------------------------------------------------------------
@@ -1638,9 +2163,12 @@ local function RenderHealerRows(targetFrame, yOffset, totalWidth, maxNameWidth, 
     local iconSize = db.iconSize;
     local iconGap = 3;
 
-    for _, rd in ipairs(rowDataCache) do
+    for rowIdx, rd in ipairs(rowDataCache) do
         local data = rd.data;
-        local row = AcquireRow();
+        local row = activeRows[rowIdx];
+        if not row then break; end  -- safety: cap at MAX_HEALER_ROWS
+        row.healerGUID = data.guid;
+        row.healerName = data.name;
 
         row:SetSize(totalWidth, rowHeight);
         row.nameText:SetFont(FONT_PATH, db.fontSize, "OUTLINE");
@@ -1721,12 +2249,20 @@ local function RenderHealerRows(targetFrame, yOffset, totalWidth, maxNameWidth, 
             row.durationText:Show();
         end
 
+        row:ClearAllPoints();
         row:SetPoint("TOPLEFT", targetFrame, "TOPLEFT", LEFT_MARGIN, yOffset);
         row:Show();
-        tinsert(activeRows, row);
 
         yOffset = yOffset - rowHeight;
     end
+
+    -- Hide excess rows
+    for i = #rowDataCache + 1, #activeRows do
+        activeRows[i]:Hide();
+        activeRows[i].healerGUID = nil;
+        activeRows[i].healerName = nil;
+    end
+
     return yOffset;
 end
 
@@ -1776,8 +2312,20 @@ local function RenderCooldownRows(targetFrame, yOffset, totalWidth)
     local cdTotalWidth = LEFT_MARGIN + cdContentWidth + RIGHT_MARGIN;
     if cdTotalWidth > totalWidth then totalWidth = cdTotalWidth; end
 
-    for _, entry in ipairs(sortedCooldownCache) do
-        local cdRow = AcquireCdRow();
+    for rowIdx, entry in ipairs(sortedCooldownCache) do
+        local cdRow = activeCdRows[rowIdx];
+        if not cdRow then break; end  -- safety: cap at MAX_CD_ROWS
+
+        cdRow:SetParent(targetFrame);
+
+        -- Store cooldown data for click-to-request
+        cdRow.sourceGUID = entry.sourceGUID;
+        cdRow.spellId = entry.spellId;
+        cdRow.casterName = entry.name;
+        cdRow.classFile = entry.classFile;
+        cdRow.spellName = entry.spellName;
+        cdRow.cdIcon = entry.icon;
+        cdRow.expiryTime = entry.expiryTime;
 
         cdRow.nameText:SetFont(FONT_PATH, cdFontSize, "OUTLINE");
         cdRow.nameText:SetWidth(cdNameMax);
@@ -1822,11 +2370,18 @@ local function RenderCooldownRows(targetFrame, yOffset, totalWidth)
         end
 
         cdRow:SetSize(totalWidth, rowHeight);
+        cdRow:ClearAllPoints();
         cdRow:SetPoint("TOPLEFT", targetFrame, "TOPLEFT", LEFT_MARGIN, yOffset);
         cdRow:Show();
-        tinsert(activeCdRows, cdRow);
 
         yOffset = yOffset - rowHeight;
+    end
+
+    -- Hide excess rows
+    for i = #sortedCooldownCache + 1, #activeCdRows do
+        activeCdRows[i]:Hide();
+        activeCdRows[i].sourceGUID = nil;
+        activeCdRows[i].spellId = nil;
     end
 
     return yOffset, totalWidth;
@@ -1834,7 +2389,7 @@ end
 
 -- Healer rows only on HealerManaFrame (split mode)
 local function RefreshHealerDisplay(sortedHealers)
-    ReleaseAllRows();
+    HideAllRows();
 
     local rowHeight = max(db.fontSize + 4, db.statusIcons and (db.iconSize + 2) or 0, 16);
     local maxNameWidth, maxManaWidth, maxStatusLabelWidth, maxStatusDurWidth = PrepareHealerRowData(sortedHealers);
@@ -1854,11 +2409,11 @@ local function RefreshHealerDisplay(sortedHealers)
         local avgMana = GetAverageMana();
         local ar, ag, ab = GetManaColor(avgMana);
         HealerManaFrame.title:SetFont(FONT_PATH, db.fontSize, "OUTLINE");
-        HealerManaFrame.title:SetFormattedText("Avg Mana: |cff%02x%02x%02x%d%%|r",
+        HealerManaFrame.title:SetFormattedText("Mana: |cff%02x%02x%02x%d%%|r",
             ar * 255, ag * 255, ab * 255, avgMana);
         HealerManaFrame.title:Show();
 
-        local titleWidth = MeasureText("Avg Mana: " .. avgMana .. "%", db.fontSize) + LEFT_MARGIN + RIGHT_MARGIN;
+        local titleWidth = MeasureText("Mana: " .. avgMana .. "%", db.fontSize) + LEFT_MARGIN + RIGHT_MARGIN;
         if titleWidth > totalWidth then totalWidth = titleWidth; end
 
         yOffset = yOffset - rowHeight;
@@ -1897,7 +2452,7 @@ end
 
 -- Cooldown rows only on CooldownFrame (split mode)
 local function RefreshCooldownDisplay()
-    ReleaseAllCdRows();
+    HideAllCdRows();
 
     if not db.showRaidCooldowns then
         CooldownFrame:Hide();
@@ -1921,10 +2476,10 @@ local function RefreshCooldownDisplay()
 
     -- Title
     CooldownFrame.title:SetFont(FONT_PATH, db.fontSize, "OUTLINE");
-    CooldownFrame.title:SetText("Raid Cooldowns");
+    CooldownFrame.title:SetText("Cooldowns");
     CooldownFrame.title:Show();
 
-    local titleWidth = MeasureText("Raid Cooldowns", db.fontSize) + LEFT_MARGIN + RIGHT_MARGIN;
+    local titleWidth = MeasureText("Cooldowns", db.fontSize) + LEFT_MARGIN + RIGHT_MARGIN;
     if titleWidth > totalWidth then totalWidth = titleWidth; end
 
     yOffset = yOffset - rowHeight;
@@ -1955,7 +2510,7 @@ end
 
 -- Merged display: healer rows + cooldown rows on HealerManaFrame (original behavior)
 local function RefreshMergedDisplay(sortedHealers)
-    ReleaseAllRows();
+    HideAllRows();
 
     local iconH = 0;
     if db.statusIcons or db.cooldownIcons then iconH = db.iconSize + 2; end
@@ -1977,11 +2532,11 @@ local function RefreshMergedDisplay(sortedHealers)
         local avgMana = GetAverageMana();
         local ar, ag, ab = GetManaColor(avgMana);
         HealerManaFrame.title:SetFont(FONT_PATH, db.fontSize, "OUTLINE");
-        HealerManaFrame.title:SetFormattedText("Avg Mana: |cff%02x%02x%02x%d%%|r",
+        HealerManaFrame.title:SetFormattedText("Mana: |cff%02x%02x%02x%d%%|r",
             ar * 255, ag * 255, ab * 255, avgMana);
         HealerManaFrame.title:Show();
 
-        local titleWidth = MeasureText("Avg Mana: " .. avgMana .. "%", db.fontSize) + LEFT_MARGIN + RIGHT_MARGIN;
+        local titleWidth = MeasureText("Mana: " .. avgMana .. "%", db.fontSize) + LEFT_MARGIN + RIGHT_MARGIN;
         if titleWidth > totalWidth then totalWidth = titleWidth; end
 
         yOffset = yOffset - rowHeight;
@@ -1998,7 +2553,7 @@ local function RefreshMergedDisplay(sortedHealers)
     yOffset = RenderHealerRows(HealerManaFrame, yOffset, totalWidth, maxNameWidth, maxManaWidth, maxStatusLabelWidth, maxStatusDurWidth);
 
     -- Raid cooldown section (merged)
-    ReleaseAllCdRows();
+    HideAllCdRows();
     HealerManaFrame.cdTitle:Hide();
     HealerManaFrame.cdSeparator:Hide();
 
@@ -2011,7 +2566,7 @@ local function RefreshMergedDisplay(sortedHealers)
         end
 
         if hasCooldowns then
-            -- "Raid Cooldowns" title (centered, like Avg Mana)
+            -- "Cooldowns" title (centered, like Avg Mana)
             yOffset = yOffset - TOP_PADDING;
             HealerManaFrame.cdTitle:SetFont(FONT_PATH, db.fontSize, "OUTLINE");
             HealerManaFrame.cdTitle:SetTextColor(1, 0.82, 0);
@@ -2019,7 +2574,7 @@ local function RefreshMergedDisplay(sortedHealers)
             HealerManaFrame.cdTitle:SetPoint("TOPLEFT", HealerManaFrame, "TOPLEFT", LEFT_MARGIN, yOffset);
             HealerManaFrame.cdTitle:Show();
 
-            local cdTitleWidth = MeasureText("Raid Cooldowns", db.fontSize) + LEFT_MARGIN + RIGHT_MARGIN;
+            local cdTitleWidth = MeasureText("Cooldowns", db.fontSize) + LEFT_MARGIN + RIGHT_MARGIN;
             if cdTitleWidth > totalWidth then totalWidth = cdTitleWidth; end
 
             yOffset = yOffset - rowHeight;
@@ -2197,6 +2752,7 @@ StartPreview = function()
     for i, td in ipairs(PREVIEW_DATA) do
         local fakeGUID = "preview-guid-" .. i;
         healers[fakeGUID] = {
+            guid = fakeGUID,
             unit = nil,
             name = td.name,
             classFile = td.classFile,
@@ -2216,6 +2772,20 @@ StartPreview = function()
             potionExpiry = td.hasPotion and (GetTime() + 90) or 0,
         };
     end
+
+    -- Save and inject mock subgroups
+    savedMemberSubgroups = {};
+    for guid, subgroup in pairs(memberSubgroups) do
+        savedMemberSubgroups[guid] = subgroup;
+    end
+    wipe(memberSubgroups);
+    memberSubgroups["preview-guid-1"] = 1;  -- Holypriest
+    memberSubgroups["preview-guid-2"] = 1;  -- Treehugger
+    memberSubgroups["preview-guid-3"] = 2;  -- Palaheals
+    memberSubgroups["preview-guid-4"] = 2;  -- Tidecaller
+    memberSubgroups["preview-guid-5"] = 2;  -- Soulstoned
+    memberSubgroups["preview-guid-ss"] = 1; -- Shadowlock (warlock)
+    memberSubgroups["preview-guid-sw"] = 2; -- Tankyboy (warrior)
 
     -- Save and inject mock raid cooldowns
     savedRaidCooldowns = {};
@@ -2247,7 +2817,7 @@ StartPreview = function()
         spellId = MANA_TIDE_CAST_SPELL_ID,
         icon = manaTideInfo.icon,
         spellName = manaTideInfo.name,
-        expiryTime = now + 180,
+        expiryTime = now - 1,  -- starts as "Ready"
     };
     raidCooldowns["preview-bl"] = {
         sourceGUID = "preview-guid-4",
@@ -2265,7 +2835,7 @@ StartPreview = function()
         spellId = 20484,
         icon = rebirthInfo.icon,
         spellName = rebirthInfo.name,
-        expiryTime = now + 900,
+        expiryTime = now - 1,  -- starts as "Ready"
     };
     raidCooldowns["preview-ss"] = {
         sourceGUID = "preview-guid-ss",
@@ -2274,7 +2844,7 @@ StartPreview = function()
         spellId = 20707,
         icon = soulstoneInfo.icon,
         spellName = soulstoneInfo.name,
-        expiryTime = now + 1200,
+        expiryTime = now - 1,  -- starts as "Ready"
     };
     raidCooldowns["preview-loh"] = {
         sourceGUID = "preview-guid-3",
@@ -2303,7 +2873,7 @@ StartPreview = function()
         spellId = SYMBOL_OF_HOPE_SPELL_ID,
         icon = sohInfo.icon,
         spellName = sohInfo.name,
-        expiryTime = now + 240,
+        expiryTime = now - 1,  -- starts as "Ready"
     };
     local swInfo = RAID_COOLDOWN_SPELLS[SHIELD_WALL_SPELL_ID];
     raidCooldowns["preview-sw"] = {
@@ -2344,11 +2914,23 @@ StopPreview = function()
         savedRaidCooldowns = nil;
     end
 
+    -- Restore real subgroup data
+    wipe(memberSubgroups);
+    if savedMemberSubgroups then
+        for guid, subgroup in pairs(savedMemberSubgroups) do
+            memberSubgroups[guid] = subgroup;
+        end
+        savedMemberSubgroups = nil;
+    end
+
+    HideContextMenu();
+
     -- Restore lock state and frame strata
     HealerManaFrame:EnableMouse(not db.locked);
     HealerManaFrame:SetFrameStrata("MEDIUM");
     CooldownFrame:EnableMouse(not db.locked);
     CooldownFrame:SetFrameStrata("MEDIUM");
+
     RefreshDisplay();
 end
 
@@ -2468,7 +3050,7 @@ local function RegisterSettings()
     AddCheckbox("showPotionCooldown", "Potion Cooldowns",
         "Display mana potion cooldown timers.");
 
-    AddCheckbox("showRaidCooldowns", "Raid Cooldowns",
+    AddCheckbox("showRaidCooldowns", "Cooldowns",
         "Display raid cooldown tracker below healer mana bars.");
 
     AddCheckbox("showStatusDuration", "Buff Durations",
@@ -2479,6 +3061,12 @@ local function RegisterSettings()
 
     AddCheckbox("cooldownIcons", "Cooldown Icons",
         "Display spell icons instead of spell names for raid cooldowns.");
+
+    AddCheckbox("showRowHighlight", "Row Hover Highlight",
+        "Highlight rows on mouse hover for visual feedback.");
+
+    AddCheckbox("enableCdRequest", "Click-to-Request Cooldowns",
+        "Click a healer row (when locked) to whisper a caster for a cooldown.");
 
     -------------------------
     -- Section: Appearance
@@ -2620,6 +3208,7 @@ local function OnEvent(self, event, ...)
         CooldownFrame:SetScale(db.scale);
         CooldownFrame:SetBackdropColor(0, 0, 0, db.bgOpacity);
         CooldownFrame:EnableMouse(not db.locked);
+    
         UpdateResizeHandleVisibility();
 
         self:UnregisterEvent("ADDON_LOADED");
@@ -2716,6 +3305,7 @@ local function SlashCommandHandler(msg)
         db.locked = not db.locked;
         HealerManaFrame:EnableMouse(not db.locked);
         CooldownFrame:EnableMouse(not db.locked);
+    
         UpdateResizeHandleVisibility();
         UpdateCdResizeHandleVisibility();
         if db.locked then
@@ -2743,6 +3333,7 @@ local function SlashCommandHandler(msg)
         CooldownFrame:SetScale(db.scale);
         CooldownFrame:SetBackdropColor(0, 0, 0, db.bgOpacity);
         CooldownFrame:EnableMouse(not db.locked);
+    
         UpdateResizeHandleVisibility();
         UpdateCdResizeHandleVisibility();
         HealerManaFrame:ClearAllPoints();
