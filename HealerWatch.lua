@@ -2663,7 +2663,7 @@ local function RenderHealerRows(targetFrame, yOffset, totalWidth, maxNameWidth, 
         row.healerGUID = data.guid;
         row.healerName = data.name;
 
-        row:SetSize(totalWidth, rowHeight);
+        row:SetHeight(rowHeight);
         row.nameText:SetFont(FONT_PATH, db.fontSize, "OUTLINE");
         row.manaText:SetFont(FONT_PATH, db.fontSize, "OUTLINE");
 
@@ -2745,6 +2745,7 @@ local function RenderHealerRows(targetFrame, yOffset, totalWidth, maxNameWidth, 
 
         row:ClearAllPoints();
         row:SetPoint("TOPLEFT", targetFrame, "TOPLEFT", LEFT_MARGIN, yOffset);
+        row:SetPoint("RIGHT", targetFrame, "RIGHT", -2, 0);
         row:Show();
 
         yOffset = yOffset - rowHeight;
@@ -2918,9 +2919,10 @@ local function RenderCooldownRows(targetFrame, yOffset, totalWidth)
             cdRow.timerText:SetTextColor(0.8, 0.8, 0.8);
         end
 
-        cdRow:SetSize(totalWidth, rowHeight);
+        cdRow:SetHeight(rowHeight);
         cdRow:ClearAllPoints();
         cdRow:SetPoint("TOPLEFT", targetFrame, "TOPLEFT", LEFT_MARGIN, yOffset);
+        cdRow:SetPoint("RIGHT", targetFrame, "RIGHT", -2, 0);
         cdRow:Show();
 
         yOffset = yOffset - rowHeight;
@@ -4196,6 +4198,19 @@ end
 
 SLASH_HEALERWATCH1 = "/healerwatch";
 SLASH_HEALERWATCH2 = "/hwatch";
+-- Register /hw shorthand only if no other addon has claimed it
+local hwTaken = false
+for key, _ in pairs(SlashCmdList) do
+    local i = 1
+    while _G["SLASH_" .. key .. i] do
+        if _G["SLASH_" .. key .. i] == "/hw" then hwTaken = true; break end
+        i = i + 1
+    end
+    if hwTaken then break end
+end
+if not hwTaken then
+    SLASH_HEALERWATCH3 = "/hw";
+end
 SlashCmdList["HEALERWATCH"] = SlashCommandHandler;
 
 --------------------------------------------------------------------------------
