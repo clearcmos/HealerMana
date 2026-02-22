@@ -3305,6 +3305,7 @@ local PREVIEW_DATA = {
     { name = "Treehugger", classFile = "DRUID", baseMana = 45, isDrinking = true, driftSeed = 1.4 },
     { name = "Palaheals", classFile = "PALADIN", baseMana = 18, hasInnervate = true, driftSeed = 0.7 },
     { name = "Tidecaller", classFile = "SHAMAN", baseMana = 64, hasManaTide = true, driftSeed = 1.2 },
+    { name = "Potionboy", classFile = "PALADIN", baseMana = 55, hasPotion = true, driftSeed = 0.9 },
     { name = "Soulstoned", classFile = "PALADIN", hasSoulstone = true, driftSeed = 0 },
     { name = "Rebirthed", classFile = "PRIEST", hasRebirth = true, driftSeed = 0 },
 };
@@ -3358,7 +3359,8 @@ StartPreview = function()
     memberSubgroups["preview-guid-2"] = 1;  -- Treehugger
     memberSubgroups["preview-guid-3"] = 2;  -- Palaheals
     memberSubgroups["preview-guid-4"] = 2;  -- Tidecaller
-    memberSubgroups["preview-guid-5"] = 2;  -- Soulstoned
+    memberSubgroups["preview-guid-5"] = 1;  -- Potionboy
+    memberSubgroups["preview-guid-6"] = 2;  -- Soulstoned
     memberSubgroups["preview-guid-ss"] = 1; -- Shadowlock (warlock)
     memberSubgroups["preview-guid-ss2"] = 2; -- Demonlock (warlock)
     memberSubgroups["preview-guid-druid2"] = 1; -- Barkskin (druid)
