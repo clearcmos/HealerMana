@@ -1,4 +1,4 @@
--- Triage: Tracks healer mana in group content with smart healer detection
+-- HealerWatch: Tracks healer mana in group content with smart healer detection
 -- For WoW Classic Anniversary Edition (2.5.5)
 
 local addonName = ...
@@ -47,8 +47,8 @@ local DEFAULT_SETTINGS = {
     headerBackground = true,
     cdInnervate = true,
     cdManaTide = true,
-    cdBloodlustHeroism = true,
-    cdPowerInfusion = true,
+    -- cdBloodlustHeroism = true,  -- disabled for now
+    -- cdPowerInfusion = true,    -- disabled for now
     cdSymbolOfHope = true,
     cdRebirth = true,
     cdSoulstone = true,
@@ -239,9 +239,9 @@ local CANONICAL_SPELL_ID = {
 local COOLDOWN_SETTING_KEY = {
     [INNERVATE_SPELL_ID]           = "cdInnervate",
     [MANA_TIDE_CAST_SPELL_ID]     = "cdManaTide",
-    [BLOODLUST_SPELL_ID]          = "cdBloodlustHeroism",
-    [HEROISM_SPELL_ID]            = "cdBloodlustHeroism",
-    [POWER_INFUSION_SPELL_ID]     = "cdPowerInfusion",
+    -- [BLOODLUST_SPELL_ID]          = "cdBloodlustHeroism",  -- disabled for now
+    -- [HEROISM_SPELL_ID]            = "cdBloodlustHeroism",  -- disabled for now
+    -- [POWER_INFUSION_SPELL_ID]     = "cdPowerInfusion",     -- disabled for now
     [SYMBOL_OF_HOPE_SPELL_ID]     = "cdSymbolOfHope",
     [20484]                        = "cdRebirth",
     [20707]                        = "cdSoulstone",
@@ -258,7 +258,7 @@ local CLASS_COOLDOWN_SPELLS = {
 -- Talent-based cooldowns to check for player via IsSpellKnown
 local TALENT_COOLDOWN_SPELLS = {
     ["SHAMAN"] = { MANA_TIDE_CAST_SPELL_ID },
-    ["PRIEST"] = { POWER_INFUSION_SPELL_ID },
+    -- ["PRIEST"] = { POWER_INFUSION_SPELL_ID },  -- disabled for now
 };
 
 -- Race-baseline cooldowns (seeded for all members of matching class+race)
@@ -287,13 +287,13 @@ local INSPECT_MAX_RETRIES = 3;
 local INSPECT_REQUEUE_INTERVAL = 5.0;
 
 -- Addon communication for cross-zone cooldown sync
-local ADDON_MSG_PREFIX = "Triage";
+local ADDON_MSG_PREFIX = "HealerWatch";
 local playerGUID;
 
 -- Broadcaster election system
 local ADDON_VERSION = C_AddOns and C_AddOns.GetAddOnMetadata(addonName, "Version") or
                       GetAddOnMetadata and GetAddOnMetadata(addonName, "Version") or "1.0.0";
-local triageUsers = {};           -- name -> { name, version, guid, unit, lastSeen, rank }
+local healerWatchUsers = {};           -- name -> { name, version, guid, unit, lastSeen, rank }
 local overrideBroadcaster = nil;  -- manual override target name (nil = auto-elect)
 local HEARTBEAT_INTERVAL = 30;
 local STALE_TIMEOUT = 90;
@@ -361,6 +361,7 @@ local UpdateCdResizeHandleVisibility;
 local HideContextMenu;
 local ShowCooldownRequestMenu;
 local ShowCdRowRequestMenu;
+local CD_REQUEST_CONFIG;
 local ShowTargetSubmenu;
 local SyncFrame;
 local RefreshSyncFrame;
@@ -565,7 +566,7 @@ local function RegisterSelf()
             break;
         end
     end
-    triageUsers[name] = {
+    healerWatchUsers[name] = {
         name = name,
         version = ADDON_VERSION,
         guid = guid,
@@ -583,13 +584,13 @@ end
 
 local function GetBroadcaster()
     -- Manual override takes priority (if the target is still known)
-    if overrideBroadcaster and triageUsers[overrideBroadcaster] then
+    if overrideBroadcaster and healerWatchUsers[overrideBroadcaster] then
         return overrideBroadcaster;
     end
 
     -- Deterministic election: highest rank wins, then alphabetical name
     local best = nil;
-    for _, user in pairs(triageUsers) do
+    for _, user in pairs(healerWatchUsers) do
         if not best then
             best = user;
         elseif user.rank > best.rank then
@@ -806,6 +807,36 @@ end
 -- Group Scanning
 --------------------------------------------------------------------------------
 
+-- Seed a single cooldown entry; for the local player, check GetSpellCooldown()
+local function SeedCooldown(guid, name, classFile, spellId, unit)
+    local canonical = CANONICAL_SPELL_ID[spellId] or spellId;
+    local key = guid .. "-" .. canonical;
+    if raidCooldowns[key] then return; end
+
+    local cdInfo = RAID_COOLDOWN_SPELLS[spellId];
+    if not cdInfo then return; end
+
+    local expiryTime = 0;  -- default: "Ready"
+
+    -- For the local player, check actual cooldown state
+    if unit and UnitIsUnit(unit, "player") then
+        local start, dur = GetSpellCooldown(spellId);
+        if start and start > 0 and dur and dur > 1.5 then  -- ignore GCD
+            expiryTime = start + dur;
+        end
+    end
+
+    raidCooldowns[key] = {
+        sourceGUID = guid,
+        name = name or "Unknown",
+        classFile = classFile or "UNKNOWN",
+        spellId = canonical,
+        icon = cdInfo.icon,
+        spellName = cdInfo.name,
+        expiryTime = expiryTime,
+    };
+end
+
 ScanGroupComposition = function()
     -- Clear inspect queue (will re-queue unresolved members below)
     wipe(inspectQueue);
@@ -907,44 +938,14 @@ ScanGroupComposition = function()
         end
     end
 
-    -- Remove triageUsers entries for players who left
-    for uname, udata in pairs(triageUsers) do
+    -- Remove healerWatchUsers entries for players who left
+    for uname, udata in pairs(healerWatchUsers) do
         if udata.guid and not seenGUIDs[udata.guid] then
-            triageUsers[uname] = nil;
+            healerWatchUsers[uname] = nil;
             if overrideBroadcaster == uname then
                 overrideBroadcaster = nil;
             end
         end
-    end
-
-    -- Helper: seed a single cooldown entry; for the local player, check GetSpellCooldown()
-    local function SeedCooldown(guid, name, classFile, spellId, unit)
-        local canonical = CANONICAL_SPELL_ID[spellId] or spellId;
-        local key = guid .. "-" .. canonical;
-        if raidCooldowns[key] then return; end
-
-        local cdInfo = RAID_COOLDOWN_SPELLS[spellId];
-        if not cdInfo then return; end
-
-        local expiryTime = 0;  -- default: "Ready"
-
-        -- For the local player, check actual cooldown state
-        if unit and UnitIsUnit(unit, "player") then
-            local start, dur = GetSpellCooldown(spellId);
-            if start and start > 0 and dur and dur > 1.5 then  -- ignore GCD
-                expiryTime = start + dur;
-            end
-        end
-
-        raidCooldowns[key] = {
-            sourceGUID = guid,
-            name = name or "Unknown",
-            classFile = classFile or "UNKNOWN",
-            spellId = canonical,
-            icon = cdInfo.icon,
-            spellName = cdInfo.name,
-            expiryTime = expiryTime,
-        };
     end
 
     -- Seed "Ready" cooldowns for class-baseline abilities
@@ -962,12 +963,12 @@ ScanGroupComposition = function()
                 end
             end
 
-            -- Shaman: BL/Heroism based on faction
-            if classFile == "SHAMAN" then
-                local faction = UnitFactionGroup(unit);
-                local blSpellId = (faction == "Horde") and BLOODLUST_SPELL_ID or HEROISM_SPELL_ID;
-                SeedCooldown(guid, name, classFile, blSpellId, unit);
-            end
+            -- Shaman: BL/Heroism based on faction (disabled for now)
+            -- if classFile == "SHAMAN" then
+            --     local faction = UnitFactionGroup(unit);
+            --     local blSpellId = (faction == "Horde") and BLOODLUST_SPELL_ID or HEROISM_SPELL_ID;
+            --     SeedCooldown(guid, name, classFile, blSpellId, unit);
+            -- end
 
             -- Race-baseline cooldowns (e.g., Symbol of Hope for Draenei Priests)
             local _, raceFile = UnitRace(unit);
@@ -1315,7 +1316,7 @@ local function CheckManaWarnings()
 
     if avgMana <= db.warningThreshold then
         local chatType = IsInRaid() and "RAID" or (IsInGroup() and "PARTY" or "SAY");
-        SendChatMessage(format("[Triage] Healer mana low! Average: %d%%", avgMana), chatType);
+        SendChatMessage(format("[HealerWatch] Healer mana low! Average: %d%%", avgMana), chatType);
         warningTriggered = true;
         lastWarningTime = now;
     end
@@ -1325,59 +1326,59 @@ end
 -- Display Frame
 --------------------------------------------------------------------------------
 
-local TriageFrame = CreateFrame("Frame", "TriageMainFrame", UIParent, "BackdropTemplate");
-TriageFrame:SetSize(220, 30);
-TriageFrame:SetFrameStrata("MEDIUM");
-TriageFrame:SetBackdrop({
+local HealerWatchFrame = CreateFrame("Frame", "HealerWatchMainFrame", UIParent, "BackdropTemplate");
+HealerWatchFrame:SetSize(220, 30);
+HealerWatchFrame:SetFrameStrata("MEDIUM");
+HealerWatchFrame:SetBackdrop({
     bgFile = "Interface\\ChatFrame\\ChatFrameBackground",
     tile = true, tileSize = 16,
 });
-TriageFrame:SetBackdropColor(0, 0, 0, 0.7);
-TriageFrame:SetClampedToScreen(true);
-TriageFrame:SetMovable(true);
-TriageFrame:EnableMouse(true);
-TriageFrame:Hide();
+HealerWatchFrame:SetBackdropColor(0, 0, 0, 0.7);
+HealerWatchFrame:SetClampedToScreen(true);
+HealerWatchFrame:SetMovable(true);
+HealerWatchFrame:EnableMouse(true);
+HealerWatchFrame:Hide();
 
 -- Header background highlight
-TriageFrame.titleBg = TriageFrame:CreateTexture(nil, "BORDER");
-TriageFrame.titleBg:SetColorTexture(0.2, 0.2, 0.2, 0.5);
-TriageFrame.titleBg:Hide();
+HealerWatchFrame.titleBg = HealerWatchFrame:CreateTexture(nil, "BORDER");
+HealerWatchFrame.titleBg:SetColorTexture(0.2, 0.2, 0.2, 0.5);
+HealerWatchFrame.titleBg:Hide();
 
 -- Title / average mana text
-TriageFrame.title = TriageFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall");
-TriageFrame.title:SetPoint("TOPLEFT", 10, -8);
-TriageFrame.title:SetJustifyH("LEFT");
+HealerWatchFrame.title = HealerWatchFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall");
+HealerWatchFrame.title:SetPoint("TOPLEFT", 10, -8);
+HealerWatchFrame.title:SetJustifyH("LEFT");
 
 -- Separator line below header
-TriageFrame.separator = TriageFrame:CreateTexture(nil, "ARTWORK");
-TriageFrame.separator:SetHeight(1);
-TriageFrame.separator:SetColorTexture(0.5, 0.5, 0.5, 0.4);
-TriageFrame.separator:Hide();
+HealerWatchFrame.separator = HealerWatchFrame:CreateTexture(nil, "ARTWORK");
+HealerWatchFrame.separator:SetHeight(1);
+HealerWatchFrame.separator:SetColorTexture(0.5, 0.5, 0.5, 0.4);
+HealerWatchFrame.separator:Hide();
 
 -- Cooldown section title (merged mode)
-TriageFrame.cdTitleBg = TriageFrame:CreateTexture(nil, "BORDER");
-TriageFrame.cdTitleBg:SetColorTexture(0.2, 0.2, 0.2, 0.5);
-TriageFrame.cdTitleBg:Hide();
+HealerWatchFrame.cdTitleBg = HealerWatchFrame:CreateTexture(nil, "BORDER");
+HealerWatchFrame.cdTitleBg:SetColorTexture(0.2, 0.2, 0.2, 0.5);
+HealerWatchFrame.cdTitleBg:Hide();
 
-TriageFrame.cdTitle = TriageFrame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall");
-TriageFrame.cdTitle:SetJustifyH("LEFT");
-TriageFrame.cdTitle:SetText("Cooldowns");
-TriageFrame.cdTitle:Hide();
+HealerWatchFrame.cdTitle = HealerWatchFrame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall");
+HealerWatchFrame.cdTitle:SetJustifyH("LEFT");
+HealerWatchFrame.cdTitle:SetText("Cooldowns");
+HealerWatchFrame.cdTitle:Hide();
 
 -- Separator line above cooldown section
-TriageFrame.cdSeparator = TriageFrame:CreateTexture(nil, "ARTWORK");
-TriageFrame.cdSeparator:SetHeight(1);
-TriageFrame.cdSeparator:SetColorTexture(0.5, 0.5, 0.5, 0.4);
-TriageFrame.cdSeparator:Hide();
+HealerWatchFrame.cdSeparator = HealerWatchFrame:CreateTexture(nil, "ARTWORK");
+HealerWatchFrame.cdSeparator:SetHeight(1);
+HealerWatchFrame.cdSeparator:SetColorTexture(0.5, 0.5, 0.5, 0.4);
+HealerWatchFrame.cdSeparator:Hide();
 
 -- Drag handlers
-TriageFrame:RegisterForDrag("LeftButton");
-TriageFrame:SetScript("OnDragStart", function(self)
+HealerWatchFrame:RegisterForDrag("LeftButton");
+HealerWatchFrame:SetScript("OnDragStart", function(self)
     if db and not db.locked then
         self:StartMoving();
     end
 end);
-TriageFrame:SetScript("OnDragStop", function(self)
+HealerWatchFrame:SetScript("OnDragStop", function(self)
     self:StopMovingOrSizing();
     if db then
         -- Re-anchor at TOPLEFT/BOTTOMLEFT for consistent save/restore
@@ -1390,14 +1391,14 @@ TriageFrame:SetScript("OnDragStop", function(self)
 end);
 
 -- Resize handle (appears on hover when unlocked)
-local resizeHandle = CreateFrame("Button", nil, TriageFrame);
+local resizeHandle = CreateFrame("Button", nil, HealerWatchFrame);
 resizeHandle:SetSize(16, 16);
 resizeHandle:SetPoint("BOTTOMRIGHT", 0, 0);
 resizeHandle:SetNormalTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Up");
 resizeHandle:SetHighlightTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Highlight");
 resizeHandle:SetPushedTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Down");
 resizeHandle:Hide();
-TriageFrame.resizeHandle = resizeHandle;
+HealerWatchFrame.resizeHandle = resizeHandle;
 
 local WIDTH_MIN = 120;
 local WIDTH_MAX = 600;
@@ -1411,10 +1412,10 @@ local resizeDragging = false;
 resizeHandle:SetScript("OnMouseDown", function(self, button)
     if button ~= "LeftButton" then return; end
     resizeDragging = true;
-    local effectiveScale = TriageFrame:GetEffectiveScale();
+    local effectiveScale = HealerWatchFrame:GetEffectiveScale();
     resizeStartCursorX, resizeStartCursorY = GetCursorPosition();
-    resizeStartW = TriageFrame:GetWidth();
-    resizeStartH = TriageFrame:GetHeight();
+    resizeStartW = HealerWatchFrame:GetWidth();
+    resizeStartH = HealerWatchFrame:GetHeight();
 
     self:SetScript("OnUpdate", function()
         local cursorX, cursorY = GetCursorPosition();
@@ -1424,8 +1425,8 @@ resizeHandle:SetScript("OnMouseDown", function(self, button)
         local newH = max(contentMinHeight, min(HEIGHT_MAX, resizeStartH + dy));
         db.frameWidth = floor(newW + 0.5);
         db.frameHeight = floor(newH + 0.5);
-        TriageFrame:SetWidth(db.frameWidth);
-        TriageFrame:SetHeight(db.frameHeight);
+        HealerWatchFrame:SetWidth(db.frameWidth);
+        HealerWatchFrame:SetHeight(db.frameHeight);
     end);
 end);
 
@@ -1442,15 +1443,15 @@ local function UpdateResizeHandleVisibility()
         return;
     end
     if resizeDragging then return; end
-    if TriageFrame:IsMouseOver() or resizeHandle:IsMouseOver() then
+    if HealerWatchFrame:IsMouseOver() or resizeHandle:IsMouseOver() then
         resizeHandle:Show();
     else
         resizeHandle:Hide();
     end
 end
 
-TriageFrame:HookScript("OnEnter", function() UpdateResizeHandleVisibility(); end);
-TriageFrame:HookScript("OnLeave", function() UpdateResizeHandleVisibility(); end);
+HealerWatchFrame:HookScript("OnEnter", function() UpdateResizeHandleVisibility(); end);
+HealerWatchFrame:HookScript("OnLeave", function() UpdateResizeHandleVisibility(); end);
 resizeHandle:SetScript("OnEnter", function() UpdateResizeHandleVisibility(); end);
 resizeHandle:SetScript("OnLeave", function() UpdateResizeHandleVisibility(); end);
 
@@ -1458,7 +1459,7 @@ resizeHandle:SetScript("OnLeave", function() UpdateResizeHandleVisibility(); end
 -- Cooldown Display Frame (split mode)
 --------------------------------------------------------------------------------
 
-local CooldownFrame = CreateFrame("Frame", "TriageCooldownFrame", UIParent, "BackdropTemplate");
+local CooldownFrame = CreateFrame("Frame", "HealerWatchCooldownFrame", UIParent, "BackdropTemplate");
 CooldownFrame:SetSize(220, 30);
 CooldownFrame:SetFrameStrata("MEDIUM");
 CooldownFrame:SetBackdrop({
@@ -1567,7 +1568,7 @@ cdResizeHandle:SetScript("OnLeave", function() UpdateCdResizeHandleVisibility();
 --------------------------------------------------------------------------------
 
 local function CreateRowFrame()
-    local frame = CreateFrame("Button", nil, TriageFrame);
+    local frame = CreateFrame("Button", nil, HealerWatchFrame);
     frame:SetSize(400, 16);
     frame:RegisterForClicks("AnyDown");
     frame:Hide();
@@ -1670,6 +1671,10 @@ local function CreateCdRowFrame()
     -- Click handler for cooldown requests
     frame:SetScript("OnClick", function(self, button)
         if button == "LeftButton" and db and db.enableCdRequest and self.spellId then
+            local config = CD_REQUEST_CONFIG[self.spellId];
+            if config and config.subgroupAware and not self.isRequestable then
+                return;  -- Ready but no eligible healer in subgroup, block click
+            end
             ShowCdRowRequestMenu(self);
         end
     end);
@@ -1709,6 +1714,7 @@ local function HideAllCdRows()
         activeCdRows[i].cdIcon = nil;
         activeCdRows[i].expiryTime = nil;
         activeCdRows[i].spellGroup = nil;
+        activeCdRows[i].isRequestable = nil;
         activeCdRows[i].spellIcon:Hide();
     end
 end
@@ -1725,15 +1731,15 @@ local REQUESTABLE_SPELLS = {
 };
 
 -- Per-spell behavior when a cooldown row is clicked
-local CD_REQUEST_CONFIG = {
-    [BLOODLUST_SPELL_ID]        = { type = "cast" },
-    [HEROISM_SPELL_ID]          = { type = "cast" },
+CD_REQUEST_CONFIG = {
+    -- [BLOODLUST_SPELL_ID]        = { type = "cast" },              -- disabled for now
+    -- [HEROISM_SPELL_ID]          = { type = "cast" },              -- disabled for now
     [INNERVATE_SPELL_ID]        = { type = "target", filter = "low_mana",  threshold = 50 },
-    [POWER_INFUSION_SPELL_ID]   = { type = "target", filter = "dps_mana" },
+    -- [POWER_INFUSION_SPELL_ID]   = { type = "target", filter = "dps_mana" },  -- disabled for now
     [20484]                     = { type = "target", filter = "dead" },                         -- Rebirth
     [20707]                     = { type = "target", filter = "alive_no_soulstone" },             -- Soulstone
-    [MANA_TIDE_CAST_SPELL_ID]   = { type = "conditional_cast", condition = "subgroup_low_mana", threshold = 20 },
-    [SYMBOL_OF_HOPE_SPELL_ID]   = { type = "cast" },
+    [MANA_TIDE_CAST_SPELL_ID]   = { type = "conditional_cast", condition = "subgroup_low_mana", threshold = 20, subgroupAware = true },
+    [SYMBOL_OF_HOPE_SPELL_ID]   = { type = "conditional_cast", condition = "subgroup_low_mana", threshold = 20, subgroupAware = true },
 };
 
 -- Check if any healer in the caster's subgroup has mana <= threshold% (excluding caster)
@@ -2037,7 +2043,7 @@ ShowCooldownRequestMenu = function(rowFrame)
 
         item:SetScript("OnMouseUp", function(self, button)
             if button ~= "LeftButton" then return; end
-            local msg = format("[Triage] %s needs %s (%s)", self.healerName, self.spellName, self.manaStr);
+            local msg = format("[HealerWatch] %s needs %s (%s)", self.healerName, self.spellName, self.manaStr);
             local recipient = previewActive and UnitName("player") or self.casterName;
             SendChatMessage(msg, "WHISPER", nil, recipient);
             HideContextMenu();
@@ -2108,7 +2114,7 @@ ShowTargetSubmenu = function(casterName, casterGUID, spellId, spellName, spellIc
 
         -- Store data for click handler
         item.casterName = casterName;
-        item.whisperMsg = format("[Triage] Cast %s on %s (%s)", spellName, t.name, t.info);
+        item.whisperMsg = format("[HealerWatch] Cast %s on %s (%s)", spellName, t.name, t.info);
 
         item:SetScript("OnMouseUp", function(self, button)
             if button ~= "LeftButton" then return; end
@@ -2159,7 +2165,7 @@ local function PickBestCaster(group)
     end
 
     if allUncast then
-        return ready[math.random(#ready)];
+        return ready[random(#ready)];
     end
 
     -- Pick the one with the lowest lastCastTime (longest since last cast)
@@ -2186,6 +2192,26 @@ ShowCdRowRequestMenu = function(cdRow)
 
     local config = CD_REQUEST_CONFIG[spellId];
     if not config then return; end
+
+    -- For subgroupAware spells, whisper the best eligible caster directly (no menu)
+    if config.subgroupAware then
+        local now = GetTime();
+        local best;
+        for _, c in ipairs(group.casters) do
+            if not c.isDead and c.expiryTime <= now then
+                if previewActive or HasLowManaHealerInSubgroup(c.guid, config.threshold or 20) then
+                    if not best or c.lastCastTime < best.lastCastTime then
+                        best = c;
+                    end
+                end
+            end
+        end
+        if not best then return; end
+        local msg = format("[HealerWatch] Cast %s please", group.spellName);
+        local recipient = previewActive and UnitName("player") or best.name;
+        SendChatMessage(msg, "WHISPER", nil, recipient);
+        return;
+    end
 
     -- For targeted spells, skip caster menu — go straight to target selection
     if config.type == "target" then
@@ -2265,7 +2291,7 @@ ShowCdRowRequestMenu = function(cdRow)
             elseif config.type == "cast" then
                 item:SetScript("OnMouseUp", function(self, button)
                     if button ~= "LeftButton" then return; end
-                    local msg = format("[Triage] Cast %s please", group.spellName);
+                    local msg = format("[HealerWatch] Cast %s please", group.spellName);
                     local recipient = previewActive and UnitName("player") or self.casterName;
                     SendChatMessage(msg, "WHISPER", nil, recipient);
                     HideContextMenu();
@@ -2279,7 +2305,7 @@ ShowCdRowRequestMenu = function(cdRow)
                 if condMet then
                     item:SetScript("OnMouseUp", function(self, button)
                         if button ~= "LeftButton" then return; end
-                        local msg = format("[Triage] Cast %s please", group.spellName);
+                        local msg = format("[HealerWatch] Cast %s please", group.spellName);
                         local recipient = previewActive and UnitName("player") or self.casterName;
                         SendChatMessage(msg, "WHISPER", nil, recipient);
                         HideContextMenu();
@@ -2331,7 +2357,7 @@ do
     local SYNC_PADDING = 10;
     local SYNC_WIDTH = 260;
 
-    local frame = CreateFrame("Frame", "TriageSyncFrame", UIParent, "BackdropTemplate");
+    local frame = CreateFrame("Frame", "HealerWatchSyncFrame", UIParent, "BackdropTemplate");
     frame:SetSize(SYNC_WIDTH, 140);
     frame:SetFrameStrata("DIALOG");
     frame:SetBackdrop({
@@ -2354,7 +2380,7 @@ do
     -- Title
     local title = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge");
     title:SetPoint("TOPLEFT", SYNC_PADDING, -SYNC_PADDING);
-    title:SetText("Triage Sync");
+    title:SetText("HealerWatch Sync");
 
     -- Close button
     local closeBtn = CreateFrame("Button", nil, frame, "UIPanelCloseButton");
@@ -2419,7 +2445,7 @@ do
 
         -- Collect and sort users: broadcaster first, then by rank desc, then alphabetical
         local sorted = {};
-        for _, user in pairs(triageUsers) do
+        for _, user in pairs(healerWatchUsers) do
             tinsert(sorted, user);
         end
         sort(sorted, function(a, b)
@@ -2428,7 +2454,7 @@ do
         end);
 
         local broadcaster = GetBroadcaster();
-        local isManual = (overrideBroadcaster and triageUsers[overrideBroadcaster]) and true or false;
+        local isManual = (overrideBroadcaster and healerWatchUsers[overrideBroadcaster]) and true or false;
         local playerName = UnitName("player");
         local yOff = -(SYNC_PADDING + 24);  -- below title
 
@@ -2860,12 +2886,30 @@ local function RenderCooldownRows(targetFrame, yOffset, totalWidth)
             end
         end
 
+        -- For subgroupAware spells, check if any ready caster has an eligible healer in their subgroup
+        local anyRequestable = false;
+        local cdConfig = CD_REQUEST_CONFIG[group.spellId];
+        if anyReady and cdConfig and cdConfig.subgroupAware then
+            for _, c in ipairs(group.casters) do
+                if not c.isDead and c.expiryTime <= now then
+                    if previewActive or HasLowManaHealerInSubgroup(c.guid, cdConfig.threshold or 20) then
+                        anyRequestable = true;
+                        break;
+                    end
+                end
+            end
+        end
+        cdRow.isRequestable = anyRequestable;
+
         if allDead then
             cdRow.timerText:SetText("DEAD");
             cdRow.timerText:SetTextColor(0.5, 0.5, 0.5);
             if not useIcons then
                 cdRow.nameText:SetTextColor(0.5, 0.5, 0.5);
             end
+        elseif anyReady and anyRequestable then
+            cdRow.timerText:SetText("Request");
+            cdRow.timerText:SetTextColor(1.0, 0.8, 0.0);
         elseif anyReady then
             cdRow.timerText:SetText("Ready");
             cdRow.timerText:SetTextColor(0.0, 1.0, 0.0);
@@ -2888,12 +2932,13 @@ local function RenderCooldownRows(targetFrame, yOffset, totalWidth)
         activeCdRows[i].sourceGUID = nil;
         activeCdRows[i].spellId = nil;
         activeCdRows[i].spellGroup = nil;
+        activeCdRows[i].isRequestable = nil;
     end
 
     return yOffset, totalWidth;
 end
 
--- Healer rows only on TriageFrame (split mode)
+-- Healer rows only on HealerWatchFrame (split mode)
 local function RefreshHealerDisplay(sortedHealers)
     HideAllRows();
 
@@ -2914,34 +2959,34 @@ local function RefreshHealerDisplay(sortedHealers)
     if db.showAverageMana then
         local avgMana = GetAverageMana();
         local ar, ag, ab = GetManaColor(avgMana);
-        TriageFrame.title:SetFont(FONT_PATH, db.fontSize, "OUTLINE");
-        TriageFrame.title:SetFormattedText("Mana: |cff%02x%02x%02x%d%%|r",
+        HealerWatchFrame.title:SetFont(FONT_PATH, db.fontSize, "OUTLINE");
+        HealerWatchFrame.title:SetFormattedText("Mana: |cff%02x%02x%02x%d%%|r",
             ar * 255, ag * 255, ab * 255, avgMana);
-        TriageFrame.title:Show();
+        HealerWatchFrame.title:Show();
 
         local titleWidth = MeasureText("Mana: " .. avgMana .. "%", db.fontSize) + LEFT_MARGIN + RIGHT_MARGIN;
         if titleWidth > totalWidth then totalWidth = titleWidth; end
 
         yOffset = yOffset - rowHeight;
         if db.headerBackground then
-            TriageFrame.separator:Hide();
-            TriageFrame.titleBg:ClearAllPoints();
-            TriageFrame.titleBg:SetPoint("TOPLEFT", TriageFrame, "TOPLEFT", 0, 0);
-            TriageFrame.titleBg:SetPoint("TOPRIGHT", TriageFrame, "TOPRIGHT", 0, 0);
-            TriageFrame.titleBg:SetHeight(TOP_PADDING + rowHeight);
-            TriageFrame.titleBg:Show();
+            HealerWatchFrame.separator:Hide();
+            HealerWatchFrame.titleBg:ClearAllPoints();
+            HealerWatchFrame.titleBg:SetPoint("TOPLEFT", HealerWatchFrame, "TOPLEFT", 0, 0);
+            HealerWatchFrame.titleBg:SetPoint("TOPRIGHT", HealerWatchFrame, "TOPRIGHT", 0, 0);
+            HealerWatchFrame.titleBg:SetHeight(TOP_PADDING + rowHeight);
+            HealerWatchFrame.titleBg:Show();
         else
-            TriageFrame.titleBg:Hide();
-            TriageFrame.separator:ClearAllPoints();
-            TriageFrame.separator:SetPoint("TOPLEFT", TriageFrame, "TOPLEFT", LEFT_MARGIN, yOffset);
-            TriageFrame.separator:SetPoint("TOPRIGHT", TriageFrame, "TOPRIGHT", -RIGHT_MARGIN, yOffset);
-            TriageFrame.separator:Show();
+            HealerWatchFrame.titleBg:Hide();
+            HealerWatchFrame.separator:ClearAllPoints();
+            HealerWatchFrame.separator:SetPoint("TOPLEFT", HealerWatchFrame, "TOPLEFT", LEFT_MARGIN, yOffset);
+            HealerWatchFrame.separator:SetPoint("TOPRIGHT", HealerWatchFrame, "TOPRIGHT", -RIGHT_MARGIN, yOffset);
+            HealerWatchFrame.separator:Show();
         end
         yOffset = yOffset - 4;
     else
-        TriageFrame.title:Hide();
-        TriageFrame.separator:Hide();
-        TriageFrame.titleBg:Hide();
+        HealerWatchFrame.title:Hide();
+        HealerWatchFrame.separator:Hide();
+        HealerWatchFrame.titleBg:Hide();
     end
 
     -- Track content-driven minimums (used by resize handle to prevent clipping)
@@ -2950,12 +2995,12 @@ local function RefreshHealerDisplay(sortedHealers)
     -- Respect user-set width as minimum
     totalWidth = max(totalWidth, db.frameWidth or 120);
 
-    yOffset = RenderHealerRows(TriageFrame, yOffset, totalWidth, maxNameWidth, maxManaWidth, maxStatusLabelWidth, maxStatusDurWidth);
+    yOffset = RenderHealerRows(HealerWatchFrame, yOffset, totalWidth, maxNameWidth, maxManaWidth, maxStatusLabelWidth, maxStatusDurWidth);
 
     -- Hide merged-mode cd elements
-    TriageFrame.cdTitle:Hide();
-    TriageFrame.cdSeparator:Hide();
-    TriageFrame.cdTitleBg:Hide();
+    HealerWatchFrame.cdTitle:Hide();
+    HealerWatchFrame.cdSeparator:Hide();
+    HealerWatchFrame.cdTitleBg:Hide();
 
     local totalHeight = -yOffset + BOTTOM_PADDING;
     contentMinHeight = totalHeight;
@@ -2963,9 +3008,9 @@ local function RefreshHealerDisplay(sortedHealers)
     -- Respect user-set height as minimum
     totalHeight = max(totalHeight, db.frameHeight or HEIGHT_MIN);
 
-    TriageFrame:SetHeight(totalHeight);
-    TriageFrame:SetWidth(totalWidth);
-    TriageFrame:Show();
+    HealerWatchFrame:SetHeight(totalHeight);
+    HealerWatchFrame:SetWidth(totalWidth);
+    HealerWatchFrame:Show();
 end
 
 -- Cooldown rows only on CooldownFrame (split mode)
@@ -3037,7 +3082,7 @@ local function RefreshCooldownDisplay()
     CooldownFrame:Show();
 end
 
--- Merged display: healer rows + cooldown rows on TriageFrame (original behavior)
+-- Merged display: healer rows + cooldown rows on HealerWatchFrame (original behavior)
 local function RefreshMergedDisplay(sortedHealers)
     HideAllRows();
 
@@ -3060,43 +3105,43 @@ local function RefreshMergedDisplay(sortedHealers)
     if db.showAverageMana then
         local avgMana = GetAverageMana();
         local ar, ag, ab = GetManaColor(avgMana);
-        TriageFrame.title:SetFont(FONT_PATH, db.fontSize, "OUTLINE");
-        TriageFrame.title:SetFormattedText("Mana: |cff%02x%02x%02x%d%%|r",
+        HealerWatchFrame.title:SetFont(FONT_PATH, db.fontSize, "OUTLINE");
+        HealerWatchFrame.title:SetFormattedText("Mana: |cff%02x%02x%02x%d%%|r",
             ar * 255, ag * 255, ab * 255, avgMana);
-        TriageFrame.title:Show();
+        HealerWatchFrame.title:Show();
 
         local titleWidth = MeasureText("Mana: " .. avgMana .. "%", db.fontSize) + LEFT_MARGIN + RIGHT_MARGIN;
         if titleWidth > totalWidth then totalWidth = titleWidth; end
 
         yOffset = yOffset - rowHeight;
         if db.headerBackground then
-            TriageFrame.separator:Hide();
-            TriageFrame.titleBg:ClearAllPoints();
-            TriageFrame.titleBg:SetPoint("TOPLEFT", TriageFrame, "TOPLEFT", 0, 0);
-            TriageFrame.titleBg:SetPoint("TOPRIGHT", TriageFrame, "TOPRIGHT", 0, 0);
-            TriageFrame.titleBg:SetHeight(TOP_PADDING + rowHeight);
-            TriageFrame.titleBg:Show();
+            HealerWatchFrame.separator:Hide();
+            HealerWatchFrame.titleBg:ClearAllPoints();
+            HealerWatchFrame.titleBg:SetPoint("TOPLEFT", HealerWatchFrame, "TOPLEFT", 0, 0);
+            HealerWatchFrame.titleBg:SetPoint("TOPRIGHT", HealerWatchFrame, "TOPRIGHT", 0, 0);
+            HealerWatchFrame.titleBg:SetHeight(TOP_PADDING + rowHeight);
+            HealerWatchFrame.titleBg:Show();
         else
-            TriageFrame.titleBg:Hide();
-            TriageFrame.separator:ClearAllPoints();
-            TriageFrame.separator:SetPoint("TOPLEFT", TriageFrame, "TOPLEFT", LEFT_MARGIN, yOffset);
-            TriageFrame.separator:SetPoint("TOPRIGHT", TriageFrame, "TOPRIGHT", -RIGHT_MARGIN, yOffset);
-            TriageFrame.separator:Show();
+            HealerWatchFrame.titleBg:Hide();
+            HealerWatchFrame.separator:ClearAllPoints();
+            HealerWatchFrame.separator:SetPoint("TOPLEFT", HealerWatchFrame, "TOPLEFT", LEFT_MARGIN, yOffset);
+            HealerWatchFrame.separator:SetPoint("TOPRIGHT", HealerWatchFrame, "TOPRIGHT", -RIGHT_MARGIN, yOffset);
+            HealerWatchFrame.separator:Show();
         end
         yOffset = yOffset - 4;
     else
-        TriageFrame.title:Hide();
-        TriageFrame.separator:Hide();
-        TriageFrame.titleBg:Hide();
+        HealerWatchFrame.title:Hide();
+        HealerWatchFrame.separator:Hide();
+        HealerWatchFrame.titleBg:Hide();
     end
 
-    yOffset = RenderHealerRows(TriageFrame, yOffset, totalWidth, maxNameWidth, maxManaWidth, maxStatusLabelWidth, maxStatusDurWidth);
+    yOffset = RenderHealerRows(HealerWatchFrame, yOffset, totalWidth, maxNameWidth, maxManaWidth, maxStatusLabelWidth, maxStatusDurWidth);
 
     -- Raid cooldown section (merged)
     HideAllCdRows();
-    TriageFrame.cdTitle:Hide();
-    TriageFrame.cdSeparator:Hide();
-    TriageFrame.cdTitleBg:Hide();
+    HealerWatchFrame.cdTitle:Hide();
+    HealerWatchFrame.cdSeparator:Hide();
+    HealerWatchFrame.cdTitleBg:Hide();
 
     if db.showRaidCooldowns then
         -- Check if there are cooldowns
@@ -3110,11 +3155,11 @@ local function RefreshMergedDisplay(sortedHealers)
             -- "Cooldowns" title (centered, like Avg Mana)
             local cdSectionTop = yOffset;
             yOffset = yOffset - TOP_PADDING;
-            TriageFrame.cdTitle:SetFont(FONT_PATH, db.fontSize, "OUTLINE");
-            TriageFrame.cdTitle:SetTextColor(1, 0.82, 0);
-            TriageFrame.cdTitle:ClearAllPoints();
-            TriageFrame.cdTitle:SetPoint("TOPLEFT", TriageFrame, "TOPLEFT", LEFT_MARGIN, yOffset);
-            TriageFrame.cdTitle:Show();
+            HealerWatchFrame.cdTitle:SetFont(FONT_PATH, db.fontSize, "OUTLINE");
+            HealerWatchFrame.cdTitle:SetTextColor(1, 0.82, 0);
+            HealerWatchFrame.cdTitle:ClearAllPoints();
+            HealerWatchFrame.cdTitle:SetPoint("TOPLEFT", HealerWatchFrame, "TOPLEFT", LEFT_MARGIN, yOffset);
+            HealerWatchFrame.cdTitle:Show();
 
             local cdTitleWidth = MeasureText("Cooldowns", db.fontSize) + LEFT_MARGIN + RIGHT_MARGIN;
             if cdTitleWidth > totalWidth then totalWidth = cdTitleWidth; end
@@ -3122,22 +3167,22 @@ local function RefreshMergedDisplay(sortedHealers)
             yOffset = yOffset - rowHeight;
 
             if db.headerBackground then
-                TriageFrame.cdSeparator:Hide();
-                TriageFrame.cdTitleBg:ClearAllPoints();
-                TriageFrame.cdTitleBg:SetPoint("TOPLEFT", TriageFrame, "TOPLEFT", 0, cdSectionTop);
-                TriageFrame.cdTitleBg:SetPoint("TOPRIGHT", TriageFrame, "TOPRIGHT", 0, cdSectionTop);
-                TriageFrame.cdTitleBg:SetHeight(TOP_PADDING + rowHeight);
-                TriageFrame.cdTitleBg:Show();
+                HealerWatchFrame.cdSeparator:Hide();
+                HealerWatchFrame.cdTitleBg:ClearAllPoints();
+                HealerWatchFrame.cdTitleBg:SetPoint("TOPLEFT", HealerWatchFrame, "TOPLEFT", 0, cdSectionTop);
+                HealerWatchFrame.cdTitleBg:SetPoint("TOPRIGHT", HealerWatchFrame, "TOPRIGHT", 0, cdSectionTop);
+                HealerWatchFrame.cdTitleBg:SetHeight(TOP_PADDING + rowHeight);
+                HealerWatchFrame.cdTitleBg:Show();
             else
-                TriageFrame.cdTitleBg:Hide();
-                TriageFrame.cdSeparator:ClearAllPoints();
-                TriageFrame.cdSeparator:SetPoint("TOPLEFT", TriageFrame, "TOPLEFT", LEFT_MARGIN, yOffset);
-                TriageFrame.cdSeparator:SetPoint("TOPRIGHT", TriageFrame, "TOPRIGHT", -RIGHT_MARGIN, yOffset);
-                TriageFrame.cdSeparator:Show();
+                HealerWatchFrame.cdTitleBg:Hide();
+                HealerWatchFrame.cdSeparator:ClearAllPoints();
+                HealerWatchFrame.cdSeparator:SetPoint("TOPLEFT", HealerWatchFrame, "TOPLEFT", LEFT_MARGIN, yOffset);
+                HealerWatchFrame.cdSeparator:SetPoint("TOPRIGHT", HealerWatchFrame, "TOPRIGHT", -RIGHT_MARGIN, yOffset);
+                HealerWatchFrame.cdSeparator:Show();
             end
             yOffset = yOffset - 4;
 
-            yOffset, totalWidth = RenderCooldownRows(TriageFrame, yOffset, totalWidth);
+            yOffset, totalWidth = RenderCooldownRows(HealerWatchFrame, yOffset, totalWidth);
         end
     end
 
@@ -3153,28 +3198,28 @@ local function RefreshMergedDisplay(sortedHealers)
     -- Respect user-set height as minimum
     totalHeight = max(totalHeight, db.frameHeight or HEIGHT_MIN);
 
-    TriageFrame:SetHeight(totalHeight);
-    TriageFrame:SetWidth(totalWidth);
-    TriageFrame:Show();
+    HealerWatchFrame:SetHeight(totalHeight);
+    HealerWatchFrame:SetWidth(totalWidth);
+    HealerWatchFrame:Show();
 end
 
 -- Dispatcher
 RefreshDisplay = function()
     if not db or not db.enabled then
-        TriageFrame:Hide();
+        HealerWatchFrame:Hide();
         CooldownFrame:Hide();
         return;
     end
 
     if not previewActive and not IsInGroup() then
-        TriageFrame:Hide();
+        HealerWatchFrame:Hide();
         CooldownFrame:Hide();
         return;
     end
 
     local sortedHealers = GetSortedHealers();
     if #sortedHealers == 0 then
-        TriageFrame:Hide();
+        HealerWatchFrame:Hide();
         CooldownFrame:Hide();
         return;
     end
@@ -3233,12 +3278,12 @@ BackgroundFrame:SetScript("OnUpdate", function(self, elapsed)
             if IsInGroup() then
                 BroadcastHello();
             end
-            -- Prune stale triageUsers
+            -- Prune stale healerWatchUsers
             local now = GetTime();
             local playerName = UnitName("player");
-            for uname, udata in pairs(triageUsers) do
+            for uname, udata in pairs(healerWatchUsers) do
                 if uname ~= playerName and now - udata.lastSeen > STALE_TIMEOUT then
-                    triageUsers[uname] = nil;
+                    healerWatchUsers[uname] = nil;
                     if overrideBroadcaster == uname then
                         overrideBroadcaster = nil;
                     end
@@ -3279,8 +3324,8 @@ BackgroundFrame:SetScript("OnUpdate", function(self, elapsed)
             end
             for key, entry in pairs(raidCooldowns) do
                 if entry.expiryTime <= now then
-                    if key == "preview-inn" or key == "preview-rebirth" or key == "preview-ss" or key == "preview-pi" or key == "preview-loh" then
-                        -- Leave expired so they show "Ready"
+                    if key == "preview-inn" or key == "preview-rebirth" or key == "preview-ss" or key == "preview-pi" or key == "preview-loh" or key == "preview-tide" or key == "preview-soh" then
+                        -- Leave expired so they show "Ready" / "Request"
                     else
                         entry.expiryTime = now + RAID_COOLDOWN_SPELLS[entry.spellId].duration;
                     end
@@ -3374,12 +3419,12 @@ StartPreview = function()
     local now = GetTime();
     local innervateInfo = RAID_COOLDOWN_SPELLS[INNERVATE_SPELL_ID];
     local manaTideInfo = RAID_COOLDOWN_SPELLS[MANA_TIDE_CAST_SPELL_ID];
-    local bloodlustInfo = RAID_COOLDOWN_SPELLS[BLOODLUST_SPELL_ID];
-    local heroismInfo = RAID_COOLDOWN_SPELLS[HEROISM_SPELL_ID];
-    -- Show Bloodlust or Heroism based on player faction
-    local isHorde = (UnitFactionGroup("player") == "Horde");
-    local blInfo = isHorde and bloodlustInfo or heroismInfo;
-    local blSpellId = isHorde and BLOODLUST_SPELL_ID or HEROISM_SPELL_ID;
+    -- Bloodlust/Heroism preview disabled for now
+    -- local bloodlustInfo = RAID_COOLDOWN_SPELLS[BLOODLUST_SPELL_ID];
+    -- local heroismInfo = RAID_COOLDOWN_SPELLS[HEROISM_SPELL_ID];
+    -- local isHorde = (UnitFactionGroup("player") == "Horde");
+    -- local blInfo = isHorde and bloodlustInfo or heroismInfo;
+    -- local blSpellId = isHorde and BLOODLUST_SPELL_ID or HEROISM_SPELL_ID;
     raidCooldowns["preview-inn"] = {
         sourceGUID = "preview-guid-2",
         name = "Treehugger",
@@ -3398,15 +3443,16 @@ StartPreview = function()
         spellName = manaTideInfo.name,
         expiryTime = now - 1,  -- starts as "Ready"
     };
-    raidCooldowns["preview-bl"] = {
-        sourceGUID = "preview-guid-4",
-        name = "Tidecaller",
-        classFile = "SHAMAN",
-        spellId = blSpellId,
-        icon = blInfo.icon,
-        spellName = blInfo.name,
-        expiryTime = now + 420,
-    };
+    -- Bloodlust/Heroism preview disabled for now
+    -- raidCooldowns["preview-bl"] = {
+    --     sourceGUID = "preview-guid-4",
+    --     name = "Tidecaller",
+    --     classFile = "SHAMAN",
+    --     spellId = blSpellId,
+    --     icon = blInfo.icon,
+    --     spellName = blInfo.name,
+    --     expiryTime = now + 420,
+    -- };
     raidCooldowns["preview-rebirth"] = {
         sourceGUID = "preview-guid-2",
         name = "Treehugger",
@@ -3425,16 +3471,17 @@ StartPreview = function()
         spellName = soulstoneInfo.name,
         expiryTime = now - 1,  -- starts as "Ready"
     };
-    local piInfo = RAID_COOLDOWN_SPELLS[POWER_INFUSION_SPELL_ID];
-    raidCooldowns["preview-pi"] = {
-        sourceGUID = "preview-guid-1",
-        name = "Holypriest",
-        classFile = "PRIEST",
-        spellId = POWER_INFUSION_SPELL_ID,
-        icon = piInfo.icon,
-        spellName = piInfo.name,
-        expiryTime = now - 1,  -- starts as "Ready"
-    };
+    -- Power Infusion preview disabled for now
+    -- local piInfo = RAID_COOLDOWN_SPELLS[POWER_INFUSION_SPELL_ID];
+    -- raidCooldowns["preview-pi"] = {
+    --     sourceGUID = "preview-guid-1",
+    --     name = "Holypriest",
+    --     classFile = "PRIEST",
+    --     spellId = POWER_INFUSION_SPELL_ID,
+    --     icon = piInfo.icon,
+    --     spellName = piInfo.name,
+    --     expiryTime = now - 1,  -- starts as "Ready"
+    -- };
     local sohInfo = RAID_COOLDOWN_SPELLS[SYMBOL_OF_HOPE_SPELL_ID];
     raidCooldowns["preview-soh"] = {
         sourceGUID = "preview-guid-1",
@@ -3475,7 +3522,7 @@ StartPreview = function()
     };
 
     -- Unlock frames for dragging while options are open
-    TriageFrame:EnableMouse(true);
+    HealerWatchFrame:EnableMouse(true);
     CooldownFrame:EnableMouse(true);
     RefreshDisplay();
 end
@@ -3514,8 +3561,8 @@ StopPreview = function()
     HideContextMenu();
 
     -- Restore lock state and frame strata
-    TriageFrame:EnableMouse(not db.locked);
-    TriageFrame:SetFrameStrata("MEDIUM");
+    HealerWatchFrame:EnableMouse(not db.locked);
+    HealerWatchFrame:SetFrameStrata("MEDIUM");
     CooldownFrame:EnableMouse(not db.locked);
     CooldownFrame:SetFrameStrata("MEDIUM");
 
@@ -3526,7 +3573,7 @@ end
 -- Options GUI (native Settings API)
 --------------------------------------------------------------------------------
 
-local triageCategoryID;
+local healerWatchCategoryID;
 
 -- Sort value mapping (Settings dropdown uses numeric keys)
 local SORT_MAP = { [1] = "mana", [2] = "name" };
@@ -3537,12 +3584,12 @@ local CD_MODE_MAP = { [1] = "text", [2] = "icons", [3] = "icons_labels" };
 local CD_MODE_REVERSE = { text = 1, icons = 2, icons_labels = 3 };
 
 local function RegisterSettings()
-    local category, layout = Settings.RegisterVerticalLayoutCategory("Triage");
+    local category, layout = Settings.RegisterVerticalLayoutCategory("HealerWatch");
 
     -- Helper: register a boolean proxy setting + checkbox
     local function AddCheckbox(key, name, tooltip, onChange)
         local setting = Settings.RegisterProxySetting(category,
-            "TRIAGE_" .. key:upper(), Settings.VarType.Boolean, name,
+            "HEALERWATCH_" .. key:upper(), Settings.VarType.Boolean, name,
             DEFAULT_SETTINGS[key],
             function() return db[key]; end,
             function(value)
@@ -3555,7 +3602,7 @@ local function RegisterSettings()
     -- Helper: register a numeric proxy setting + slider
     local function AddSlider(key, name, tooltip, minVal, maxVal, step, onChange, getFn, setFn)
         local setting = Settings.RegisterProxySetting(category,
-            "TRIAGE_" .. key:upper(), Settings.VarType.Number, name,
+            "HEALERWATCH_" .. key:upper(), Settings.VarType.Number, name,
             getFn and getFn(DEFAULT_SETTINGS[key]) or DEFAULT_SETTINGS[key],
             getFn and function() return getFn(db[key]); end or function() return db[key]; end,
             function(value)
@@ -3576,8 +3623,8 @@ local function RegisterSettings()
     -------------------------
     layout:AddInitializer(CreateSettingsListSectionHeaderInitializer("Display"));
 
-    AddCheckbox("enabled", "Enable Triage",
-        "Toggle the Triage display on or off.",
+    AddCheckbox("enabled", "Enable HealerWatch",
+        "Toggle the HealerWatch display on or off.",
         function() RefreshDisplay(); end);
 
     AddCheckbox("showAverageMana", "Show Average Mana",
@@ -3586,7 +3633,7 @@ local function RegisterSettings()
     AddCheckbox("locked", "Lock Frame Position",
         "Prevent the frames from being dragged.",
         function(value)
-            TriageFrame:EnableMouse(not value);
+            HealerWatchFrame:EnableMouse(not value);
             CooldownFrame:EnableMouse(not value);
             UpdateResizeHandleVisibility();
             UpdateCdResizeHandleVisibility();
@@ -3598,7 +3645,7 @@ local function RegisterSettings()
 
     -- Sort dropdown
     local sortSetting = Settings.RegisterProxySetting(category,
-        "TRIAGE_SORT_BY", Settings.VarType.Number, "Sort Healers By",
+        "HEALERWATCH_SORT_BY", Settings.VarType.Number, "Sort Healers By",
         SORT_REVERSE[DEFAULT_SETTINGS.sortBy] or 1,
         function() return SORT_REVERSE[db.sortBy] or 1; end,
         function(value) db.sortBy = SORT_MAP[value] or "mana"; end);
@@ -3657,8 +3704,8 @@ local function RegisterSettings()
     AddCheckbox("showRaidCooldowns", "Enable Cooldown Tracking",
         "Track group cooldowns with Ready/on-cooldown timers in a dedicated section.");
 
-    AddCheckbox("cdBloodlustHeroism", "Bloodlust / Heroism",
-        "Track Bloodlust and Heroism cooldowns in the cooldown section.");
+    -- AddCheckbox("cdBloodlustHeroism", "Bloodlust / Heroism",  -- disabled for now
+    --     "Track Bloodlust and Heroism cooldowns in the cooldown section.");
 
     AddCheckbox("cdInnervate", "Innervate",
         "Track Innervate cooldowns in the cooldown section.");
@@ -3666,8 +3713,8 @@ local function RegisterSettings()
     AddCheckbox("cdManaTide", "Mana Tide",
         "Track Mana Tide Totem cooldowns in the cooldown section.");
 
-    AddCheckbox("cdPowerInfusion", "Power Infusion",
-        "Track Power Infusion cooldowns in the cooldown section.");
+    -- AddCheckbox("cdPowerInfusion", "Power Infusion",  -- disabled for now
+    --     "Track Power Infusion cooldowns in the cooldown section.");
 
     AddCheckbox("cdRebirth", "Rebirth",
         "Track Rebirth cooldowns in the cooldown section.");
@@ -3680,7 +3727,7 @@ local function RegisterSettings()
 
     -- Cooldown display mode dropdown
     local cdModeSetting = Settings.RegisterProxySetting(category,
-        "TRIAGE_CD_DISPLAY_MODE", Settings.VarType.Number, "Cooldown Display Mode",
+        "HEALERWATCH_CD_DISPLAY_MODE", Settings.VarType.Number, "Cooldown Display Mode",
         CD_MODE_REVERSE[DEFAULT_SETTINGS.cooldownDisplayMode] or 3,
         function() return CD_MODE_REVERSE[db.cooldownDisplayMode] or 3; end,
         function(value) db.cooldownDisplayMode = CD_MODE_MAP[value] or "icons_labels"; end);
@@ -3714,7 +3761,7 @@ local function RegisterSettings()
         "Overall scale of both frames, as a percentage (100% = default size).",
         50, 200, 10,
         function(value)
-            TriageFrame:SetScale(value / 100);
+            HealerWatchFrame:SetScale(value / 100);
             CooldownFrame:SetScale(value / 100);
         end,
         function(raw) return floor(raw * 100 + 0.5); end,
@@ -3724,7 +3771,7 @@ local function RegisterSettings()
         "Background opacity of both frames.",
         0, 100, 5,
         function(value)
-            TriageFrame:SetBackdropColor(0, 0, 0, value / 100);
+            HealerWatchFrame:SetBackdropColor(0, 0, 0, value / 100);
             CooldownFrame:SetBackdropColor(0, 0, 0, value / 100);
         end,
         function(raw) return floor(raw * 100 + 0.5); end,
@@ -3753,7 +3800,7 @@ local function RegisterSettings()
     layout:AddInitializer(CreateSettingsListSectionHeaderInitializer("Chat Warnings"));
 
     local sendWarnInit = AddCheckbox("sendWarnings", "Send Warning Messages",
-        "Send a chat warning to party/raid when average healer mana drops below the warning threshold. When multiple players have Triage, only the elected broadcaster sends warnings. Use /tr sync to see the broadcaster.");
+        "Send a chat warning to party/raid when average healer mana drops below the warning threshold. When multiple players have HealerWatch, only the elected broadcaster sends warnings. Use /hwatch sync to see the broadcaster.");
 
     local warnCdInit = AddSlider("warningCooldown", "Warning Cooldown (sec)",
         "After a warning is sent, wait at least this many seconds before sending another. Prevents chat spam during sustained low mana.",
@@ -3768,7 +3815,7 @@ local function RegisterSettings()
         function() return db.sendWarnings; end);
 
     Settings.RegisterAddOnCategory(category);
-    triageCategoryID = category:GetID();
+    healerWatchCategoryID = category:GetID();
 end
 
 --------------------------------------------------------------------------------
@@ -3783,18 +3830,18 @@ local function OnEvent(self, event, ...)
         if loadedAddon ~= addonName then return; end
 
         -- Initialize SavedVariables
-        if not TriageDB then
-            TriageDB = {};
+        if not HealerWatchDB then
+            HealerWatchDB = {};
         end
 
         -- Copy defaults for missing keys
         for key, value in pairs(DEFAULT_SETTINGS) do
-            if TriageDB[key] == nil then
-                TriageDB[key] = value;
+            if HealerWatchDB[key] == nil then
+                HealerWatchDB[key] = value;
             end
         end
 
-        db = TriageDB;
+        db = HealerWatchDB;
 
         -- Clean up removed settings
         db.optionsBgOpacity = nil;
@@ -3823,10 +3870,10 @@ local function OnEvent(self, event, ...)
 
         -- Apply saved position (healer frame)
         if db.frameX and db.frameY then
-            TriageFrame:ClearAllPoints();
-            TriageFrame:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT", db.frameX, db.frameY);
+            HealerWatchFrame:ClearAllPoints();
+            HealerWatchFrame:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT", db.frameX, db.frameY);
         else
-            TriageFrame:SetPoint("LEFT", UIParent, "LEFT", 20, 100);
+            HealerWatchFrame:SetPoint("LEFT", UIParent, "LEFT", 20, 100);
         end
 
         -- Apply saved position (cooldown frame — default below healer frame)
@@ -3841,9 +3888,9 @@ local function OnEvent(self, event, ...)
         end
 
         -- Apply settings to both frames
-        TriageFrame:SetScale(db.scale);
-        TriageFrame:SetBackdropColor(0, 0, 0, db.bgOpacity);
-        TriageFrame:EnableMouse(not db.locked);
+        HealerWatchFrame:SetScale(db.scale);
+        HealerWatchFrame:SetBackdropColor(0, 0, 0, db.bgOpacity);
+        HealerWatchFrame:EnableMouse(not db.locked);
         CooldownFrame:SetScale(db.scale);
         CooldownFrame:SetBackdropColor(0, 0, 0, db.bgOpacity);
         CooldownFrame:EnableMouse(not db.locked);
@@ -3855,7 +3902,7 @@ local function OnEvent(self, event, ...)
         -- Register addon message prefix for cross-zone cooldown sync
         C_ChatInfo.RegisterAddonMessagePrefix(ADDON_MSG_PREFIX);
 
-        print("|cff00ff00Triage|r loaded. Type |cff00ffff/triage|r or visit Options > AddOns.");
+        print("|cff00ff00HealerWatch|r loaded. Type |cff00ffff/healerwatch|r or visit Options > AddOns.");
 
     elseif event == "PLAYER_LOGIN" then
         playerGUID = UnitGUID("player");
@@ -3871,8 +3918,8 @@ local function OnEvent(self, event, ...)
             RegisterSelf();
             BroadcastHello();
         else
-            -- Solo: wipe triageUsers, keep only self
-            wipe(triageUsers);
+            -- Solo: wipe healerWatchUsers, keep only self
+            wipe(healerWatchUsers);
             overrideBroadcaster = nil;
             RegisterSelf();
         end
@@ -3941,7 +3988,7 @@ local function OnEvent(self, event, ...)
                     break;
                 end
             end
-            triageUsers[senderName] = {
+            healerWatchUsers[senderName] = {
                 name = senderName,
                 version = helloVersion,
                 guid = senderGUID2,
@@ -4064,9 +4111,9 @@ local function OpenOptions()
         StartPreview();
     end
     previewFromSettings = true;
-    TriageFrame:SetFrameStrata("TOOLTIP");
+    HealerWatchFrame:SetFrameStrata("TOOLTIP");
     CooldownFrame:SetFrameStrata("TOOLTIP");
-    Settings.OpenToCategory(triageCategoryID);
+    Settings.OpenToCategory(healerWatchCategoryID);
 end
 
 local function SlashCommandHandler(msg)
@@ -4077,41 +4124,41 @@ local function SlashCommandHandler(msg)
 
     elseif msg == "lock" then
         db.locked = not db.locked;
-        TriageFrame:EnableMouse(not db.locked);
+        HealerWatchFrame:EnableMouse(not db.locked);
         CooldownFrame:EnableMouse(not db.locked);
     
         UpdateResizeHandleVisibility();
         UpdateCdResizeHandleVisibility();
         if db.locked then
-            print("|cff00ff00Triage|r frames locked.");
+            print("|cff00ff00HealerWatch|r frames locked.");
         else
-            print("|cff00ff00Triage|r frames unlocked. Drag to reposition.");
+            print("|cff00ff00HealerWatch|r frames unlocked. Drag to reposition.");
         end
 
     elseif msg == "test" then
         if previewActive then
             StopPreview();
-            print("|cff00ff00Triage|r preview stopped.");
+            print("|cff00ff00HealerWatch|r preview stopped.");
         else
             StartPreview();
-            print("|cff00ff00Triage|r showing preview. Use |cff00ffff/triage test|r again to stop.");
+            print("|cff00ff00HealerWatch|r showing preview. Use |cff00ffff/healerwatch test|r again to stop.");
         end
 
     elseif msg == "reset" then
         for key, value in pairs(DEFAULT_SETTINGS) do
             db[key] = value;
         end
-        TriageFrame:SetScale(db.scale);
-        TriageFrame:SetBackdropColor(0, 0, 0, db.bgOpacity);
-        TriageFrame:EnableMouse(not db.locked);
+        HealerWatchFrame:SetScale(db.scale);
+        HealerWatchFrame:SetBackdropColor(0, 0, 0, db.bgOpacity);
+        HealerWatchFrame:EnableMouse(not db.locked);
         CooldownFrame:SetScale(db.scale);
         CooldownFrame:SetBackdropColor(0, 0, 0, db.bgOpacity);
         CooldownFrame:EnableMouse(not db.locked);
     
         UpdateResizeHandleVisibility();
         UpdateCdResizeHandleVisibility();
-        TriageFrame:ClearAllPoints();
-        TriageFrame:SetPoint("LEFT", UIParent, "LEFT", 20, 100);
+        HealerWatchFrame:ClearAllPoints();
+        HealerWatchFrame:SetPoint("LEFT", UIParent, "LEFT", 20, 100);
         CooldownFrame:ClearAllPoints();
         CooldownFrame:SetPoint("LEFT", UIParent, "LEFT", 20, -50);
         db.frameX = nil;
@@ -4122,7 +4169,7 @@ local function SlashCommandHandler(msg)
         db.cdFrameY = nil;
         db.cdFrameWidth = nil;
         db.cdFrameHeight = nil;
-        print("|cff00ff00Triage|r settings reset to defaults.");
+        print("|cff00ff00HealerWatch|r settings reset to defaults.");
 
     elseif msg == "sync" then
         RegisterSelf();
@@ -4134,22 +4181,22 @@ local function SlashCommandHandler(msg)
         end
 
     elseif msg == "help" then
-        print("|cff00ff00Triage|r commands:");
-        print("  |cff00ffff/triage|r - Open Options > AddOns > Triage");
-        print("  |cff00ffff/triage lock|r - Toggle frame lock");
-        print("  |cff00ffff/triage test|r - Show test healer data");
-        print("  |cff00ffff/triage sync|r - Show broadcaster sync window");
-        print("  |cff00ffff/triage reset|r - Reset to defaults");
-        print("  |cff00ffff/triage help|r - Show this help");
+        print("|cff00ff00HealerWatch|r commands:");
+        print("  |cff00ffff/healerwatch|r - Open Options > AddOns > HealerWatch");
+        print("  |cff00ffff/healerwatch lock|r - Toggle frame lock");
+        print("  |cff00ffff/healerwatch test|r - Show test healer data");
+        print("  |cff00ffff/healerwatch sync|r - Show broadcaster sync window");
+        print("  |cff00ffff/healerwatch reset|r - Reset to defaults");
+        print("  |cff00ffff/healerwatch help|r - Show this help");
 
     else
-        print("|cff00ff00Triage|r: Unknown command. Use |cff00ffff/triage help|r for commands.");
+        print("|cff00ff00HealerWatch|r: Unknown command. Use |cff00ffff/healerwatch help|r for commands.");
     end
 end
 
-SLASH_TRIAGE1 = "/triage";
-SLASH_TRIAGE2 = "/tr";
-SlashCmdList["TRIAGE"] = SlashCommandHandler;
+SLASH_HEALERWATCH1 = "/healerwatch";
+SLASH_HEALERWATCH2 = "/hwatch";
+SlashCmdList["HEALERWATCH"] = SlashCommandHandler;
 
 --------------------------------------------------------------------------------
 -- Initialize db reference (will be overwritten on ADDON_LOADED)
