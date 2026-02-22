@@ -1,6 +1,6 @@
 # Triage
 
-**Triage** tracks healer mana and raid cooldowns in group content. Automatically detects healers via talent inspection, displays color-coded mana bars with status indicators, and monitors key cooldowns like Innervate, Rebirth, Bloodlust, and more with ready/countdown timers.
+**Triage** tracks healer mana and raid cooldowns in group content. Automatically detects healers via role assignment and talent inspection, displays color-coded mana bars with status indicators, and monitors key cooldowns like Innervate, Rebirth, Bloodlust, and more with ready/countdown timers.
 
 Built specifically for **TBC Classic Anniversary**.
 
