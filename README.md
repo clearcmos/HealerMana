@@ -1,6 +1,6 @@
-# HealerMana
+# Triage
 
-**HealerMana** tracks healer mana in group content with smart healer detection via talent inspection.
+**Triage** tracks healer mana in group content with smart healer detection via talent inspection.
 
 Built specifically for **TBC Classic Anniversary**.
 
@@ -11,29 +11,34 @@ Built specifically for **TBC Classic Anniversary**.
 - **Smart healer detection** - Automatically identifies healers by inspecting their talent spec. No manual role assignment needed.
 - **Color-coded mana display** - Shows each healer's mana percentage with color coding (green/yellow/orange/red)
 - **Average mana** - Displays the average mana across all healers at the top
-- **Status indicators** - Shows when healers are Drinking, have Innervate, or Mana Tide Totem active, with optional durations
+- **Status indicators** - Shows when healers are Drinking, have Innervate, Symbol of Hope, or Mana Tide Totem active, with optional durations. Text or icon display modes.
 - **Potion tracking** - Tracks potion cooldowns (2 min) via combat log
-- **Raid cooldown tracking** - Monitors Innervate, Mana Tide, Bloodlust/Heroism, Power Infusion, Divine Intervention, Rebirth, Lay on Hands, Soulstone, and Shield Wall. Shows "Ready" or countdown timer per caster. Class-baseline cooldowns detected automatically on group join.
+- **Soulstone indicator** - Purple "SS" on dead healers who have a soulstone
+- **Raid cooldown tracking** - Monitors Innervate, Mana Tide, Bloodlust/Heroism, Power Infusion, Rebirth, Lay on Hands, Soulstone, Shield Wall, and Symbol of Hope. Shows "Ready" or countdown timer per caster. Each cooldown individually toggleable.
+- **Cooldown display modes** - Text only, icons only, or icons with labels
+- **Click-to-request cooldowns** - Click a healer row or cooldown row to whisper a request
 - **Dead/DC detection** - Grey indicators for dead or disconnected healers
-- **Chat warnings** - Optional automatic warnings to party/raid when healer mana drops below configurable thresholds
+- **Chat warnings** - Optional automatic warnings to party/raid when healer mana drops below a configurable threshold
 - **Sorting** - Sort healers by lowest mana first or alphabetically
-- **Resizable frame** - Drag the corner handle to resize (appears on hover when unlocked)
-- **Fully configurable** - Options panel with font size, scale, opacity, color thresholds, warning thresholds, and more
+- **Split or merged display** - Raid cooldowns in their own independently movable frame or combined with healer mana
+- **Resizable frames** - Drag the corner handle to resize (appears on hover when unlocked)
+- **Fully configurable** - Options panel with font size, scale, opacity, color thresholds, per-cooldown toggles, and more
 - **Live preview** - See your changes instantly with animated mock data while configuring
 
 ---
 
 ## Usage
 
-Type `/hm` to open the options panel.
+Type `/triage` to open the options panel.
 
 ### Slash Commands
 
-- `/hm` - Open options panel
-- `/hm lock` - Toggle frame lock (drag to reposition when unlocked)
-- `/hm test` - Show test data to preview the display
-- `/hm reset` - Reset all settings to defaults
-- `/hm help` - Show available commands
+- `/triage` - Open options panel
+- `/triage lock` - Toggle frame lock (drag to reposition when unlocked)
+- `/triage test` - Show test data to preview the display
+- `/triage reset` - Reset all settings to defaults
+- `/triage help` - Show available commands
+- `/tr` - Short alias for all commands above
 
 ---
 
@@ -41,31 +46,38 @@ Type `/hm` to open the options panel.
 
 **Display Settings**
 - Enable/Disable addon
-- Show when solo
 - Show average mana
-- Show Drinking, Innervate, Mana Tide status
-- Show potion cooldowns
-- Show raid cooldowns
-- Shortened status labels
-- Show buff durations
+- Sort healers by mana or name
 - Lock frame position
 
-**Chat Warnings**
-- Enable/Disable warning messages
-- Warning cooldown (seconds)
-- High, medium, and low mana thresholds
+**Healer Status Indicators**
+- Show Drinking, Innervate, Mana Tide, Symbol of Hope, Soulstone, Rebirth status
+- Show buff durations
+- Show potion cooldowns
+- Text or icon status display
+- Click-to-request cooldowns
+
+**Raid Cooldowns**
+- Show/hide raid cooldown section
+- Per-cooldown toggles (Innervate, Mana Tide, Bloodlust/Heroism, Power Infusion, Symbol of Hope, Shield Wall, Rebirth, Lay on Hands, Soulstone)
+- Display mode: text, icons, or icons with labels
+- Icon size
+- Split cooldowns into separate frame
 
 **Appearance**
 - Font size
 - Scale
 - Display opacity
-- Options panel opacity
+- Row highlights
+- Header background
+
+**Chat Warnings**
+- Enable/Disable warning messages
+- Mana threshold percentage
+- Warning cooldown (seconds)
 
 **Mana Color Thresholds**
 - Green, yellow, and orange percentage thresholds
-
-**Sorting**
-- Lowest mana first or alphabetical
 
 ---
 
@@ -77,4 +89,4 @@ MIT License - Open source and free to use.
 
 ## Feedback & Issues
 
-Found a bug or have a suggestion? Reach me on Discord: `_cmos` or open an issue on GitHub: https://github.com/clearcmos/HealerMana
+Found a bug or have a suggestion? Reach me on Discord: `_cmos` or open an issue on GitHub: https://github.com/clearcmos/Triage

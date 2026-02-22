@@ -1,4 +1,4 @@
-package-as: HealerMana
+package-as: Triage
 
 manual-changelog:
   filename: CHANGELOG.md

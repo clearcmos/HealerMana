@@ -1,8 +1,8 @@
 ## Interface: 20505
-## Title: HealerMana
+## Title: Triage
 ## Notes: Tracks healer mana in group content with smart healer detection via talent inspection
 ## Author: clearcmos
-## Version: 1.1.0
-## SavedVariables: HealerManaDB
+## Version: 1.0.0
+## SavedVariables: TriageDB
 
-HealerMana.lua
+Triage.lua
