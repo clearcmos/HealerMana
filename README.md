@@ -4,9 +4,11 @@
 
 This addon is currently experimental and may have bugs. It is being actively developed and improved. If you encounter any issues or have suggestions, please post a comment on the addon page - your feedback helps!
 
-**HealerWatch** tracks healer mana and raid cooldowns in group content. It automatically detects healers via talent inspection, displays color-coded mana percentages with status indicators, and monitors key cooldowns like Innervate, Rebirth, and Soulstone with ready/countdown timers.
+**HealerWatch** monitors healer mana and raid cooldowns in group content, with click-to-request coordination for cooldowns like Innervate, Rebirth, and Soulstone. It automatically detects healers via talent inspection and displays color-coded mana percentages with status indicators. Highly customizable with a live preview.
 
 Built specifically for **TBC Classic Anniversary**.
+
+![HealerWatch](https://github.com/clearcmos/HealerWatch/blob/main/assets/image1.png?raw=true)
 
 ---
 

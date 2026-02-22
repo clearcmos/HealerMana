@@ -2,7 +2,7 @@
 
 ## Overview
 
-HealerWatch is a WoW Classic Anniversary Edition addon that tracks healer mana in group content. It automatically detects healers via talent inspection (since role assignment is unreliable in Classic) and displays their mana percentages with color coding and status indicators. It also tracks raid-wide cooldowns (Innervate, Mana Tide, Rebirth, Soulstone, Symbol of Hope) via combat log. Bloodlust/Heroism and Power Infusion infrastructure exists but is disabled.
+HealerWatch is a WoW Classic Anniversary Edition addon that monitors healer mana and raid cooldowns in group content, with click-to-request coordination for cooldowns like Innervate, Rebirth, and Soulstone. It automatically detects healers via talent inspection (since role assignment is unreliable in Classic) and displays their mana percentages with color coding and status indicators. It also tracks raid-wide cooldowns (Innervate, Mana Tide, Rebirth, Soulstone, Symbol of Hope) via combat log. Bloodlust/Heroism and Power Infusion infrastructure exists but is disabled.
 
 ## Architecture
 
