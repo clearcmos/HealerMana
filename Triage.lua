@@ -50,57 +50,15 @@ local DEFAULT_SETTINGS = {
     cdBloodlustHeroism = true,
     cdPowerInfusion = true,
     cdSymbolOfHope = true,
-    cdShieldWall = true,
     cdRebirth = true,
     cdLayOnHands = true,
     cdSoulstone = true,
 };
 
 --------------------------------------------------------------------------------
--- Local References for Performance
+-- Local References
 --------------------------------------------------------------------------------
 
-local CreateFrame = CreateFrame;
-local GetTime = GetTime;
-local pairs = pairs;
-local ipairs = ipairs;
-local tinsert = table.insert;
-local tremove = table.remove;
-local wipe = table.wipe;
-local sort = sort;
-local format = string.format;
-local floor = math.floor;
-local sin = sin;
-local cos = cos;
-local min = math.min;
-local max = math.max;
-local UnitName = UnitName;
-local UnitClass = UnitClass;
-local UnitPower = UnitPower;
-local UnitPowerMax = UnitPowerMax;
-local UnitGUID = UnitGUID;
-local UnitExists = UnitExists;
-local UnitIsConnected = UnitIsConnected;
-local UnitIsDeadOrGhost = UnitIsDeadOrGhost;
-local UnitIsVisible = UnitIsVisible;
-local UnitGroupRolesAssigned = UnitGroupRolesAssigned;
-local UnitBuff = UnitBuff;
-local IsInRaid = IsInRaid;
-local IsInGroup = IsInGroup;
-local GetNumGroupMembers = GetNumGroupMembers;
-local CombatLogGetCurrentEventInfo = CombatLogGetCurrentEventInfo;
-local SendChatMessage = SendChatMessage;
-local NotifyInspect = NotifyInspect;
-local ClearInspectPlayer = ClearInspectPlayer;
-local CanInspect = CanInspect;
-local GetPlayerInfoByGUID = GetPlayerInfoByGUID;
-local GetCursorPosition = GetCursorPosition;
-local GetRaidRosterInfo = GetRaidRosterInfo;
-local IsSpellKnown = IsSpellKnown;
-local UnitFactionGroup = UnitFactionGroup;
-local UnitHealth = UnitHealth;
-local UnitHealthMax = UnitHealthMax;
-local UnitPowerType = UnitPowerType;
 local band = bit.band;
 
 --------------------------------------------------------------------------------
@@ -174,8 +132,6 @@ local HEROISM_SPELL_ID = 32182;
 local POWER_INFUSION_SPELL_ID = 10060;
 local SYMBOL_OF_HOPE_SPELL_ID = 32548;
 local SYMBOL_OF_HOPE_SPELL_NAME = GetSpellInfo(32548) or "Symbol of Hope";
-local SHIELD_WALL_SPELL_ID = 871;
-
 -- Soulstone Resurrection buff IDs (applied to target when warlock uses soulstone)
 local SOULSTONE_BUFF_IDS = {
     [20707] = true,    -- Soulstone Resurrection (Minor)
@@ -241,11 +197,6 @@ local RAID_COOLDOWN_SPELLS = {
         icon = select(3, GetSpellInfo(SYMBOL_OF_HOPE_SPELL_ID)) or 135982,
         duration = 300,
     },
-    [SHIELD_WALL_SPELL_ID] = {
-        name = GetSpellInfo(SHIELD_WALL_SPELL_ID) or "Shield Wall",
-        icon = select(3, GetSpellInfo(SHIELD_WALL_SPELL_ID)) or 132362,
-        duration = 1800,
-    },
 };
 
 -- Rebirth (6 ranks, all same CD) — shared info referenced by each rank ID
@@ -303,7 +254,6 @@ local COOLDOWN_SETTING_KEY = {
     [HEROISM_SPELL_ID]            = "cdBloodlustHeroism",
     [POWER_INFUSION_SPELL_ID]     = "cdPowerInfusion",
     [SYMBOL_OF_HOPE_SPELL_ID]     = "cdSymbolOfHope",
-    [SHIELD_WALL_SPELL_ID]        = "cdShieldWall",
     [20484]                        = "cdRebirth",
     [633]                          = "cdLayOnHands",
     [20707]                        = "cdSoulstone",
@@ -315,23 +265,12 @@ local CLASS_COOLDOWN_SPELLS = {
     ["PALADIN"] = { 633 },                                        -- Lay on Hands
     ["WARLOCK"] = { 20707 },                                      -- Soulstone
     -- Shaman BL/Heroism handled separately (faction-dependent)
-    -- Warrior Shield Wall handled via tank spec detection (TANK_COOLDOWN_SPELLS)
 };
 
 -- Talent-based cooldowns to check for player via IsSpellKnown
 local TALENT_COOLDOWN_SPELLS = {
     ["SHAMAN"] = { MANA_TIDE_CAST_SPELL_ID },
     ["PRIEST"] = { POWER_INFUSION_SPELL_ID, SYMBOL_OF_HOPE_SPELL_ID },
-};
-
--- Tank spec detection (Protection warriors) for tank-specific cooldowns
-local TANK_TALENT_TABS = {
-    ["WARRIOR"] = { [3] = true },  -- Protection
-};
-
--- Cooldowns seeded only after confirming tank spec via inspection
-local TANK_COOLDOWN_SPELLS = {
-    ["WARRIOR"] = { SHIELD_WALL_SPELL_ID },
 };
 
 --------------------------------------------------------------------------------
@@ -588,30 +527,6 @@ local function IsHealerCapableClass(unit)
     return HEALER_CAPABLE_CLASSES[classFile] == true, classFile;
 end
 
--- Seed tank-specific cooldowns for a confirmed tank
-local function SeedTankCooldowns(guid, data)
-    local tankSpells = TANK_COOLDOWN_SPELLS[data.classFile];
-    if not tankSpells then return; end
-    for _, spellId in ipairs(tankSpells) do
-        local key = guid .. "-" .. spellId;
-        if not raidCooldowns[key] then
-            local cdInfo = RAID_COOLDOWN_SPELLS[spellId];
-            if cdInfo then
-                raidCooldowns[key] = {
-                    sourceGUID = guid,
-                    name = data.name or "Unknown",
-                    classFile = data.classFile,
-                    spellId = spellId,
-                    icon = cdInfo.icon,
-                    spellName = cdInfo.name,
-                    expiryTime = 0,
-                    lastCastTime = 0,
-                };
-            end
-        end
-    end
-end
-
 local function QueueInspect(unit)
     local guid = UnitGUID(unit);
     if not guid then return; end
@@ -624,9 +539,7 @@ local function QueueInspect(unit)
     -- Don't re-queue if we already know all their statuses
     local data = healers[guid];
     if data then
-        local needsHealerCheck = data.isHealer == nil and HEALER_CAPABLE_CLASSES[data.classFile];
-        local needsTankCheck = data.isTank == nil and TANK_TALENT_TABS[data.classFile];
-        if not needsHealerCheck and not needsTankCheck then return; end
+        if data.isHealer ~= nil or not HEALER_CAPABLE_CLASSES[data.classFile] then return; end
     end
 
     tinsert(inspectQueue, { unit = unit, guid = guid });
@@ -637,10 +550,7 @@ local function CheckSelfSpec()
     if not guid or not healers[guid] then return; end
 
     local _, classFile = UnitClass("player");
-    local isCapable = HEALER_CAPABLE_CLASSES[classFile];
-    local isTankClass = TANK_TALENT_TABS[classFile];
-
-    if not isCapable and not isTankClass then
+    if not HEALER_CAPABLE_CLASSES[classFile] then
         healers[guid].isHealer = false;
         return;
     end
@@ -667,32 +577,16 @@ local function CheckSelfSpec()
     end
 
     if maxPoints > 0 and primaryTab then
-        -- Healer detection
-        if isCapable then
-            if primaryRole == "HEALER" then
-                healers[guid].isHealer = true;
-            elseif primaryRole then
-                healers[guid].isHealer = false;
-            else
-                local healTabs = HEALING_TALENT_TABS[classFile];
-                healers[guid].isHealer = (healTabs and healTabs[primaryTab]) or false;
-            end
-        end
-        -- Tank detection (role is nil in Classic; use talent tab mapping)
-        if isTankClass then
-            local tankTabs = TANK_TALENT_TABS[classFile];
-            healers[guid].isTank = (tankTabs and tankTabs[primaryTab]) or false;
-            if healers[guid].isTank then
-                SeedTankCooldowns(guid, healers[guid]);
-            end
+        if primaryRole == "HEALER" then
+            healers[guid].isHealer = true;
+        elseif primaryRole then
+            healers[guid].isHealer = false;
+        else
+            local healTabs = HEALING_TALENT_TABS[classFile];
+            healers[guid].isHealer = (healTabs and healTabs[primaryTab]) or false;
         end
     else
-        if isCapable then
-            healers[guid].isHealer = (GetNumGroupMembers() <= 5);
-        end
-        if isTankClass then
-            healers[guid].isTank = false;
-        end
+        healers[guid].isHealer = (GetNumGroupMembers() <= 5);
     end
 end
 
@@ -734,38 +628,25 @@ local function ProcessInspectResult(inspecteeGUID)
         end
     end
 
-    local isCapable = HEALER_CAPABLE_CLASSES[classFile];
-    local isTankClass = TANK_TALENT_TABS[classFile];
+    if not HEALER_CAPABLE_CLASSES[classFile] then
+        ClearInspectPlayer();
+        inspectPending = nil;
+        return;
+    end
 
     if maxPoints > 0 and primaryTab then
-        -- Healer detection
-        if isCapable then
-            if primaryRole == "HEALER" then
-                data.isHealer = true;
-            elseif primaryRole then
-                data.isHealer = false;
-            else
-                local healTabs = HEALING_TALENT_TABS[classFile];
-                data.isHealer = (healTabs and healTabs[primaryTab]) or false;
-            end
-        end
-        -- Tank detection
-        if isTankClass then
-            local tankTabs = TANK_TALENT_TABS[classFile];
-            data.isTank = (tankTabs and tankTabs[primaryTab]) or false;
-            if data.isTank then
-                SeedTankCooldowns(inspecteeGUID, data);
-            end
+        if primaryRole == "HEALER" then
+            data.isHealer = true;
+        elseif primaryRole then
+            data.isHealer = false;
+        else
+            local healTabs = HEALING_TALENT_TABS[classFile];
+            data.isHealer = (healTabs and healTabs[primaryTab]) or false;
         end
     else
         -- API returned no data; assume healer in small groups, retry in raids
-        if isCapable then
-            if GetNumGroupMembers() <= 5 then
-                data.isHealer = true;
-            end
-        end
-        if isTankClass then
-            data.isTank = false;
+        if GetNumGroupMembers() <= 5 then
+            data.isHealer = true;
         end
     end
 
@@ -824,10 +705,6 @@ local function ProcessInspectQueue()
                     data.isHealer = false;
                 end
             end
-            -- Don't assume tank on failed inspect
-            if data and data.isTank == nil and TANK_TALENT_TABS[data.classFile] then
-                data.isTank = false;
-            end
         end
     end
 end
@@ -881,7 +758,6 @@ ScanGroupComposition = function()
                     hasSymbolOfHope = false,
                     symbolOfHopeExpiry = 0,
                     potionExpiry = 0,
-                    isTank = nil,
                 };
             end
 
@@ -896,15 +772,6 @@ ScanGroupComposition = function()
                 healers[guid].isHealer = false;
             elseif healers[guid].isHealer == nil then
                 -- Self: check directly, others: queue inspect
-                if UnitIsUnit(unit, "player") then
-                    CheckSelfSpec();
-                else
-                    QueueInspect(unit);
-                end
-            end
-
-            -- Tank spec detection (warriors need inspection to confirm Protection)
-            if TANK_TALENT_TABS[classFile] and healers[guid].isTank == nil then
                 if UnitIsUnit(unit, "player") then
                     CheckSelfSpec();
                 else
@@ -1013,16 +880,6 @@ ScanGroupComposition = function()
         end
     end
 
-    -- Seed tank-specific cooldowns for confirmed tanks
-    for _, unit in ipairs(units) do
-        local guid = UnitGUID(unit);
-        if guid then
-            local data = healers[guid];
-            if data and data.isTank then
-                SeedTankCooldowns(guid, data);
-            end
-        end
-    end
 end
 
 local function GetSortedHealers()
@@ -1727,7 +1584,6 @@ local REQUESTABLE_SPELLS = {
 local CD_REQUEST_CONFIG = {
     [BLOODLUST_SPELL_ID]        = { type = "cast" },
     [HEROISM_SPELL_ID]          = { type = "cast" },
-    [SHIELD_WALL_SPELL_ID]      = { type = "cast" },
     [INNERVATE_SPELL_ID]        = { type = "target", filter = "low_mana",  threshold = 50 },
     [633]                       = { type = "target", filter = "low_health", threshold = 30 },  -- Lay on Hands
     [POWER_INFUSION_SPELL_ID]   = { type = "target", filter = "dps_mana" },
@@ -3036,9 +2892,7 @@ BackgroundFrame:SetScript("OnUpdate", function(self, elapsed)
             if #inspectQueue == 0 and not inspectPending then
                 for guid, data in pairs(healers) do
                     if data.unit and UnitExists(data.unit) then
-                        local needsHealerCheck = data.isHealer == nil and HEALER_CAPABLE_CLASSES[data.classFile];
-                        local needsTankCheck = data.isTank == nil and TANK_TALENT_TABS[data.classFile];
-                        if needsHealerCheck or needsTankCheck then
+                        if data.isHealer == nil and HEALER_CAPABLE_CLASSES[data.classFile] then
                             QueueInspect(data.unit);
                         end
                     end
@@ -3162,7 +3016,6 @@ StartPreview = function()
     memberSubgroups["preview-guid-ss"] = 1; -- Shadowlock (warlock)
     memberSubgroups["preview-guid-ss2"] = 2; -- Demonlock (warlock)
     memberSubgroups["preview-guid-druid2"] = 1; -- Barkskin (druid)
-    memberSubgroups["preview-guid-sw"] = 2; -- Tankyboy (warrior)
 
     -- Save and inject mock raid cooldowns
     savedRaidCooldowns = {};
@@ -3252,16 +3105,6 @@ StartPreview = function()
         icon = sohInfo.icon,
         spellName = sohInfo.name,
         expiryTime = now - 1,  -- starts as "Ready"
-    };
-    local swInfo = RAID_COOLDOWN_SPELLS[SHIELD_WALL_SPELL_ID];
-    raidCooldowns["preview-sw"] = {
-        sourceGUID = "preview-guid-sw",
-        name = "Tankyboy",
-        classFile = "WARRIOR",
-        spellId = SHIELD_WALL_SPELL_ID,
-        icon = swInfo.icon,
-        spellName = swInfo.name,
-        expiryTime = now + 1500,
     };
     -- Duplicate casters to demonstrate spell grouping
     raidCooldowns["preview-inn2"] = {
@@ -3492,9 +3335,6 @@ local function RegisterSettings()
 
     AddCheckbox("cdRebirth", "Rebirth",
         "Track Rebirth cooldowns in the cooldown section.");
-
-    AddCheckbox("cdShieldWall", "Shield Wall",
-        "Track Shield Wall cooldowns in the cooldown section.");
 
     AddCheckbox("cdSoulstone", "Soulstone",
         "Track Soulstone cooldowns in the cooldown section.");
