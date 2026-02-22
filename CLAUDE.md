@@ -2,7 +2,7 @@
 
 ## Overview
 
-Triage is a WoW Classic Anniversary Edition addon that tracks healer mana in group content. It automatically detects healers via talent inspection (since role assignment is unreliable in Classic) and displays their mana percentages with color coding and status indicators. It also tracks raid-wide cooldowns (Innervate, Mana Tide, Bloodlust/Heroism, Power Infusion, Rebirth, Lay on Hands, Soulstone, Shield Wall, Symbol of Hope) via combat log.
+Triage is a WoW Classic Anniversary Edition addon that tracks healer mana in group content. It automatically detects healers via talent inspection (since role assignment is unreliable in Classic) and displays their mana percentages with color coding and status indicators. It also tracks raid-wide cooldowns (Innervate, Mana Tide, Bloodlust/Heroism, Power Infusion, Rebirth, Lay on Hands, Soulstone, Symbol of Hope) via combat log.
 
 ## Architecture
 
@@ -17,7 +17,7 @@ Triage is a WoW Classic Anniversary Edition addon that tracks healer mana in gro
 
 2. **Inspection Queue** — async system that queues `NotifyInspect()` calls with 2.5s cooldown, pauses in combat, validates range via `CanInspect()`. Runs on a separate `BackgroundFrame` (always shown) to avoid the hidden-frame OnUpdate deadlock. Periodically re-queues unresolved members.
 
-3. **Raid Cooldown Tracker** — monitors `SPELL_CAST_SUCCESS` (and `SPELL_AURA_APPLIED` for Soulstone) in combat log for key raid cooldowns. Class-baseline cooldowns (Innervate, Rebirth, Lay on Hands, Soulstone, Bloodlust/Heroism) are pre-seeded as "Ready" on group scan; player talent cooldowns (Mana Tide, Power Infusion) detected via `IsSpellKnown()`. Tank-specific cooldowns (Shield Wall) seeded after confirming tank spec via inspection. Multi-rank spells use canonical spell IDs for consistent keys. Displays with class-colored caster names, spell names, and countdown timers (or green "Ready"). Supports text, icon, and icon+label display modes.
+3. **Raid Cooldown Tracker** — monitors `SPELL_CAST_SUCCESS` (and `SPELL_AURA_APPLIED` for Soulstone) in combat log for key raid cooldowns. Class-baseline cooldowns (Innervate, Rebirth, Lay on Hands, Soulstone, Bloodlust/Heroism) are pre-seeded as "Ready" on group scan; player talent cooldowns (Mana Tide, Power Infusion) detected via `IsSpellKnown()`. Multi-rank spells use canonical spell IDs for consistent keys. Displays with class-colored caster names, spell names, and countdown timers (or green "Ready"). Supports text, icon, and icon+label display modes.
 
 4. **Display System** — two independently movable, resizable frames (`TriageFrame` for healer rows, `CooldownFrame` for raid cooldowns) with BackdropTemplate. `splitFrames` setting (default false) controls whether cooldowns render in their own frame or merge into TriageFrame. Object-pooled row frames reparented on acquire. Resize handles appear on hover, clamped to content-driven minimums. All periodic logic (preview animation, mana updates, display refresh) runs on BackgroundFrame to avoid hidden-frame OnUpdate deadlock.
 
@@ -34,7 +34,7 @@ Triage is a WoW Classic Anniversary Edition addon that tracks healer mana in gro
 | S3      | 106-336        | Constants (classes, healing tabs, potions, raid cooldowns, canonical IDs, COOLDOWN_SETTING_KEY, class/talent/tank mappings) |
 | S4      | 337-412        | State variables (incl. cdFrame resize state, context menu, subgroup tracking) |
 | S5      | 413-581        | Utility functions (iteration, colors, measurement, status formatting) |
-| S6      | 582-834        | Healer detection engine (self-spec, inspect results, inspect queue, tank spec seeding) |
+| S6      | 582-834        | Healer detection engine (self-spec, inspect results, inspect queue) |
 | S7      | 835-1108       | Group scanning + class cooldown seeding + cooldown grouping |
 | S8      | 1109-1147      | Mana updating |
 | S9      | 1148-1208      | Buff/status tracking |
@@ -60,7 +60,7 @@ Triage is a WoW Classic Anniversary Edition addon that tracks healer mana in gro
 - Status indicators: Drinking, Innervate, Mana Tide Totem, Symbol of Hope (text or icon mode, with optional durations)
 - Potion cooldown tracking (2min timer from combat log)
 - Soulstone status indicator on dead healers (purple "SS"/"Soulstone")
-- Raid cooldown tracking with Ready/on-cooldown states: Innervate, Mana Tide, Bloodlust/Heroism, Power Infusion, Rebirth, Lay on Hands, Soulstone, Shield Wall, Symbol of Hope (each individually toggleable)
+- Raid cooldown tracking with Ready/on-cooldown states: Innervate, Mana Tide, Bloodlust/Heroism, Power Infusion, Rebirth, Lay on Hands, Soulstone, Symbol of Hope (each individually toggleable)
 - Cooldown display modes: text only, icons only, or icons with labels
 - Click-to-request cooldowns via whisper (healer rows and cooldown rows)
 - Average mana across all healers

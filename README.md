@@ -14,7 +14,7 @@ Built specifically for **TBC Classic Anniversary**.
 - **Status indicators** - Shows when healers are Drinking, have Innervate, Symbol of Hope, or Mana Tide Totem active, with optional durations. Text or icon display modes.
 - **Potion tracking** - Tracks potion cooldowns (2 min) via combat log
 - **Soulstone indicator** - Purple "SS" on dead healers who have a soulstone
-- **Raid cooldown tracking** - Monitors Innervate, Mana Tide, Bloodlust/Heroism, Power Infusion, Rebirth, Lay on Hands, Soulstone, Shield Wall, and Symbol of Hope. Shows "Ready" or countdown timer per caster. Each cooldown individually toggleable.
+- **Raid cooldown tracking** - Monitors Innervate, Mana Tide, Bloodlust/Heroism, Power Infusion, Rebirth, Lay on Hands, Soulstone, and Symbol of Hope. Shows "Ready" or countdown timer per caster. Each cooldown individually toggleable.
 - **Cooldown display modes** - Text only, icons only, or icons with labels
 - **Click-to-request cooldowns** - Click a healer row or cooldown row to whisper a request
 - **Dead/DC detection** - Grey indicators for dead or disconnected healers
@@ -59,7 +59,7 @@ Type `/triage` to open the options panel.
 
 **Raid Cooldowns**
 - Show/hide raid cooldown section
-- Per-cooldown toggles (Innervate, Mana Tide, Bloodlust/Heroism, Power Infusion, Symbol of Hope, Shield Wall, Rebirth, Lay on Hands, Soulstone)
+- Per-cooldown toggles (Innervate, Mana Tide, Bloodlust/Heroism, Power Infusion, Symbol of Hope, Rebirth, Lay on Hands, Soulstone)
 - Display mode: text, icons, or icons with labels
 - Icon size
 - Split cooldowns into separate frame

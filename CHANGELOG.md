@@ -9,7 +9,7 @@
 - Status indicators: Drinking, Innervate, Mana Tide Totem, Symbol of Hope (text or icon mode, with optional durations)
 - Soulstone status indicator on dead healers
 - Potion cooldown tracking via combat log (2 min timer)
-- Raid cooldown tracking: Innervate, Mana Tide, Bloodlust/Heroism, Power Infusion, Rebirth, Lay on Hands, Soulstone, Shield Wall, Symbol of Hope
+- Raid cooldown tracking: Innervate, Mana Tide, Bloodlust/Heroism, Power Infusion, Rebirth, Lay on Hands, Soulstone, Symbol of Hope
 - Per-cooldown toggles and display modes (text, icons, icons + labels)
 - Click-to-request cooldowns via whisper
 - Split or merged cooldown display with independently movable frames
