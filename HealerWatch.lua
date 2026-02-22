@@ -343,6 +343,13 @@ local cdResizeStartCursorX, cdResizeStartCursorY, cdResizeStartW, cdResizeStartH
 local lastWarningTime = 0;
 local warningTriggered = false;
 
+-- Whisper throttle (misclick protection)
+local lastWhisperTime = 0;
+local WHISPER_COOLDOWN = 1.0;
+
+-- Menu dismiss suppression (prevents click-through when closing menu)
+local menuDismissTime = 0;
+
 -- Update throttling
 local updateElapsed = 0;
 local UPDATE_INTERVAL = 0.2;
@@ -351,6 +358,7 @@ local inspectElapsed = 0;
 -- Preview state
 local previewActive = false;
 local savedHealers = nil;
+local previewGroupMembers = {};
 
 -- Forward declarations
 local RefreshDisplay;
@@ -1391,12 +1399,14 @@ HealerWatchFrame:SetScript("OnDragStop", function(self)
 end);
 
 -- Resize handle (appears on hover when unlocked)
-local resizeHandle = CreateFrame("Button", nil, HealerWatchFrame);
+local resizeHandle = CreateFrame("Frame", nil, HealerWatchFrame);
 resizeHandle:SetSize(16, 16);
 resizeHandle:SetPoint("BOTTOMRIGHT", 0, 0);
-resizeHandle:SetNormalTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Up");
-resizeHandle:SetHighlightTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Highlight");
-resizeHandle:SetPushedTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Down");
+resizeHandle:EnableMouse(true);
+resizeHandle.tex = resizeHandle:CreateTexture(nil, "OVERLAY");
+resizeHandle.tex:SetAllPoints();
+resizeHandle.tex:SetTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Up");
+resizeHandle.tex:SetVertexColor(0.6, 0.6, 0.6);
 resizeHandle:Hide();
 HealerWatchFrame.resizeHandle = resizeHandle;
 
@@ -1412,6 +1422,7 @@ local resizeDragging = false;
 resizeHandle:SetScript("OnMouseDown", function(self, button)
     if button ~= "LeftButton" then return; end
     resizeDragging = true;
+    self.tex:SetVertexColor(1, 1, 1);
     local effectiveScale = HealerWatchFrame:GetEffectiveScale();
     resizeStartCursorX, resizeStartCursorY = GetCursorPosition();
     resizeStartW = HealerWatchFrame:GetWidth();
@@ -1432,6 +1443,7 @@ end);
 
 resizeHandle:SetScript("OnMouseUp", function(self)
     resizeDragging = false;
+    self.tex:SetVertexColor(0.6, 0.6, 0.6);
     self:SetScript("OnUpdate", nil);
 end);
 
@@ -1452,8 +1464,14 @@ end
 
 HealerWatchFrame:HookScript("OnEnter", function() UpdateResizeHandleVisibility(); end);
 HealerWatchFrame:HookScript("OnLeave", function() UpdateResizeHandleVisibility(); end);
-resizeHandle:SetScript("OnEnter", function() UpdateResizeHandleVisibility(); end);
-resizeHandle:SetScript("OnLeave", function() UpdateResizeHandleVisibility(); end);
+resizeHandle:SetScript("OnEnter", function()
+    if not resizeDragging then resizeHandle.tex:SetVertexColor(1, 1, 1); end
+    UpdateResizeHandleVisibility();
+end);
+resizeHandle:SetScript("OnLeave", function()
+    if not resizeDragging then resizeHandle.tex:SetVertexColor(0.6, 0.6, 0.6); end
+    UpdateResizeHandleVisibility();
+end);
 
 --------------------------------------------------------------------------------
 -- Cooldown Display Frame (split mode)
@@ -1508,18 +1526,21 @@ CooldownFrame:SetScript("OnDragStop", function(self)
 end);
 
 -- Resize handle for cooldown frame (appears on hover when unlocked)
-local cdResizeHandle = CreateFrame("Button", nil, CooldownFrame);
+local cdResizeHandle = CreateFrame("Frame", nil, CooldownFrame);
 cdResizeHandle:SetSize(16, 16);
 cdResizeHandle:SetPoint("BOTTOMRIGHT", 0, 0);
-cdResizeHandle:SetNormalTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Up");
-cdResizeHandle:SetHighlightTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Highlight");
-cdResizeHandle:SetPushedTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Down");
+cdResizeHandle:EnableMouse(true);
+cdResizeHandle.tex = cdResizeHandle:CreateTexture(nil, "OVERLAY");
+cdResizeHandle.tex:SetAllPoints();
+cdResizeHandle.tex:SetTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Up");
+cdResizeHandle.tex:SetVertexColor(0.6, 0.6, 0.6);
 cdResizeHandle:Hide();
 CooldownFrame.resizeHandle = cdResizeHandle;
 
 cdResizeHandle:SetScript("OnMouseDown", function(self, button)
     if button ~= "LeftButton" then return; end
     cdResizeDragging = true;
+    self.tex:SetVertexColor(1, 1, 1);
     local effectiveScale = CooldownFrame:GetEffectiveScale();
     cdResizeStartCursorX, cdResizeStartCursorY = GetCursorPosition();
     cdResizeStartW = CooldownFrame:GetWidth();
@@ -1540,6 +1561,7 @@ end);
 
 cdResizeHandle:SetScript("OnMouseUp", function(self)
     cdResizeDragging = false;
+    self.tex:SetVertexColor(0.6, 0.6, 0.6);
     self:SetScript("OnUpdate", nil);
 end);
 
@@ -1560,8 +1582,14 @@ end
 
 CooldownFrame:HookScript("OnEnter", function() UpdateCdResizeHandleVisibility(); end);
 CooldownFrame:HookScript("OnLeave", function() UpdateCdResizeHandleVisibility(); end);
-cdResizeHandle:SetScript("OnEnter", function() UpdateCdResizeHandleVisibility(); end);
-cdResizeHandle:SetScript("OnLeave", function() UpdateCdResizeHandleVisibility(); end);
+cdResizeHandle:SetScript("OnEnter", function()
+    if not cdResizeDragging then cdResizeHandle.tex:SetVertexColor(1, 1, 1); end
+    UpdateCdResizeHandleVisibility();
+end);
+cdResizeHandle:SetScript("OnLeave", function()
+    if not cdResizeDragging then cdResizeHandle.tex:SetVertexColor(0.6, 0.6, 0.6); end
+    UpdateCdResizeHandleVisibility();
+end);
 
 --------------------------------------------------------------------------------
 -- Row Frame Pool
@@ -1588,9 +1616,28 @@ local function CreateRowFrame()
     end);
 
     frame:SetScript("OnClick", function(self, button)
-        if button == "LeftButton" and db and db.enableCdRequest and self.healerGUID then
-            ShowCooldownRequestMenu(self);
+        if button ~= "LeftButton" or not db or not db.enableCdRequest or not self.healerGUID then return; end
+        if GetTime() - menuDismissTime < 0.2 then return; end  -- suppress click-through from menu dismiss
+        -- Dead healer without soulstone/rebirth: auto-whisper rebirth druid
+        if self.needsRebirth then
+            local now = GetTime();
+            local bestName;
+            for _, entry in pairs(raidCooldowns) do
+                if entry.spellId == 20484 and not IsCasterDead(entry.sourceGUID) and entry.expiryTime <= now then
+                    bestName = entry.name;
+                    break;
+                end
+            end
+            if bestName and GetTime() - lastWhisperTime >= WHISPER_COOLDOWN then
+                lastWhisperTime = GetTime();
+                local deadName = self.healerName or "a healer";
+                local msg = format("[HealerWatch] Can you Rebirth %s?", deadName);
+                local recipient = previewActive and UnitName("player") or bestName;
+                SendChatMessage(msg, "WHISPER", nil, recipient);
+            end
+            return;
         end
+        ShowCooldownRequestMenu(self);
     end);
 
     -- Name: class-colored, left-aligned
@@ -1610,6 +1657,15 @@ local function CreateRowFrame()
     -- Status duration: left-aligned after the label column
     frame.durationText = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall");
     frame.durationText:SetJustifyH("LEFT");
+
+    -- Dead pulse overlay (subtle red glow for dead healers needing rebirth)
+    local deadPulse = frame:CreateTexture(nil, "ARTWORK");
+    deadPulse:SetAllPoints();
+    deadPulse:SetColorTexture(1.0, 0.7, 0.0, 1.0);
+    deadPulse:SetAlpha(0);
+    deadPulse:Hide();
+    frame.deadPulse = deadPulse;
+    frame.needsRebirth = false;
 
     -- Icon mode: up to 4 status icon slots (texture + small duration text)
     frame.statusIcons = {};
@@ -1637,6 +1693,8 @@ local function HideAllRows()
         activeRows[i]:Hide();
         activeRows[i].healerGUID = nil;
         activeRows[i].healerName = nil;
+        activeRows[i].needsRebirth = false;
+        activeRows[i].deadPulse:Hide();
         for j = 1, 4 do
             activeRows[i].statusIcons[j].icon:Hide();
             activeRows[i].statusIcons[j].dur:Hide();
@@ -1671,6 +1729,7 @@ local function CreateCdRowFrame()
     -- Click handler for cooldown requests
     frame:SetScript("OnClick", function(self, button)
         if button == "LeftButton" and db and db.enableCdRequest and self.spellId then
+            if GetTime() - menuDismissTime < 0.2 then return; end  -- suppress click-through from menu dismiss
             local config = CD_REQUEST_CONFIG[self.spellId];
             if config and config.subgroupAware and not self.isRequestable then
                 return;  -- Ready but no eligible healer in subgroup, block click
@@ -1692,7 +1751,8 @@ local function CreateCdRowFrame()
     -- Request pulse overlay (subtle amber glow)
     local pulse = frame:CreateTexture(nil, "ARTWORK");
     pulse:SetAllPoints();
-    pulse:SetColorTexture(1.0, 0.7, 0.0, 0);
+    pulse:SetColorTexture(1.0, 0.7, 0.0, 1.0);
+    pulse:SetAlpha(0);
     pulse:Hide();
     frame.requestPulse = pulse;
     frame.isRequest = false;
@@ -1774,32 +1834,41 @@ local function ScanGroupTargets(filter, threshold, casterGUID)
 
     if previewActive then
         -- Preview mode: bypass thresholds so all targets are always clickable
-        for guid, data in pairs(healers) do
-            if guid ~= casterGUID then
-                if filter == "low_mana" then
-                    if data.manaPercent >= 0 then
-                        tinsert(results, { name = data.name, guid = guid, classFile = data.classFile,
-                            info = format("%d%% mana", data.manaPercent), sortValue = data.manaPercent });
+        if filter == "dead" or filter == "alive_no_soulstone" then
+            -- Use full group member list (includes non-healers)
+            for _, m in ipairs(previewGroupMembers) do
+                if m.guid ~= casterGUID then
+                    if filter == "dead" then
+                        if m.isDead and not m.hasSoulstone and not m.hasRebirth then
+                            tinsert(results, { name = m.name, guid = m.guid, classFile = m.classFile,
+                                info = "Dead" });
+                        end
+                    elseif filter == "alive_no_soulstone" then
+                        if not m.isDead and not m.hasSoulstone then
+                            tinsert(results, { name = m.name, guid = m.guid, classFile = m.classFile,
+                                info = "" });
+                        end
                     end
-                elseif filter == "low_health" then
-                    if data.manaPercent >= 0 then
-                        tinsert(results, { name = data.name, guid = guid, classFile = data.classFile,
-                            info = format("%d%% health", data.manaPercent), sortValue = data.manaPercent });
-                    end
-                elseif filter == "dead" then
-                    if data.manaPercent == -2 then
-                        tinsert(results, { name = data.name, guid = guid, classFile = data.classFile,
-                            info = "Dead" });
-                    end
-                elseif filter == "alive_no_soulstone" then
-                    if data.manaPercent >= 0 then
-                        tinsert(results, { name = data.name, guid = guid, classFile = data.classFile,
-                            info = format("%d%% mana", data.manaPercent) });
-                    end
-                elseif filter == "dps_mana" then
-                    if data.classFile == "SHAMAN" then
-                        tinsert(results, { name = data.name, guid = guid, classFile = data.classFile,
-                            info = "DPS" });
+                end
+            end
+        else
+            for guid, data in pairs(healers) do
+                if guid ~= casterGUID then
+                    if filter == "low_mana" then
+                        if data.manaPercent >= 0 then
+                            tinsert(results, { name = data.name, guid = guid, classFile = data.classFile,
+                                info = format("%d%% mana", data.manaPercent), sortValue = data.manaPercent });
+                        end
+                    elseif filter == "low_health" then
+                        if data.manaPercent >= 0 then
+                            tinsert(results, { name = data.name, guid = guid, classFile = data.classFile,
+                                info = format("%d%% health", data.manaPercent), sortValue = data.manaPercent });
+                        end
+                    elseif filter == "dps_mana" then
+                        if data.classFile == "SHAMAN" then
+                            tinsert(results, { name = data.name, guid = guid, classFile = data.classFile,
+                                info = "DPS" });
+                        end
                     end
                 end
             end
@@ -1838,7 +1907,9 @@ local function ScanGroupTargets(filter, threshold, casterGUID)
                 elseif filter == "dead" then
                     if UnitIsDeadOrGhost(unit) then
                         local healerData = healers[guid];
-                        if not healerData or not healerData.hasSoulstone then
+                        local hasSS = healerData and healerData.hasSoulstone;
+                        local hasRB = healerData and healerData.hasRebirth;
+                        if not hasSS and not hasRB then
                             tinsert(results, { name = name, guid = guid, classFile = classFile,
                                 info = "Dead" });
                         end
@@ -1848,7 +1919,7 @@ local function ScanGroupTargets(filter, threshold, casterGUID)
                         local healerData = healers[guid];
                         if not healerData or not healerData.hasSoulstone then
                             tinsert(results, { name = name, guid = guid, classFile = classFile,
-                                info = format("%s", classFile and classFile or "") });
+                                info = "" });
                         end
                     end
                 elseif filter == "dps_mana" then
@@ -1988,6 +2059,9 @@ HideContextMenu = function()
         contextMenuFrame:Hide();
         contextMenuFrame:UnregisterEvent("GLOBAL_MOUSE_DOWN");
     end
+    if contextMenuVisible then
+        menuDismissTime = GetTime();
+    end
     contextMenuVisible = false;
 end
 
@@ -2053,6 +2127,8 @@ ShowCooldownRequestMenu = function(rowFrame)
 
         item:SetScript("OnMouseUp", function(self, button)
             if button ~= "LeftButton" then return; end
+            if GetTime() - lastWhisperTime < WHISPER_COOLDOWN then return; end
+            lastWhisperTime = GetTime();
             local msg = format("[HealerWatch] %s needs %s (%s)", self.healerName, self.spellName, self.manaStr);
             local recipient = previewActive and UnitName("player") or self.casterName;
             SendChatMessage(msg, "WHISPER", nil, recipient);
@@ -2114,7 +2190,7 @@ ShowTargetSubmenu = function(casterName, casterGUID, spellId, spellName, spellIc
 
         local cr, cg, cb = GetClassColor(t.classFile);
         local coloredName = format("|cff%02x%02x%02x%s|r", cr * 255, cg * 255, cb * 255, t.name);
-        local displayText = format("%s (%s)", coloredName, t.info);
+        local displayText = (t.info and t.info ~= "") and format("%s (%s)", coloredName, t.info) or coloredName;
         item.text:SetText(displayText);
         item.icon:SetTexture(spellIcon);
 
@@ -2124,10 +2200,12 @@ ShowTargetSubmenu = function(casterName, casterGUID, spellId, spellName, spellIc
 
         -- Store data for click handler
         item.casterName = casterName;
-        item.whisperMsg = format("[HealerWatch] Cast %s on %s (%s)", spellName, t.name, t.info);
+        item.whisperMsg = (t.info and t.info ~= "") and format("[HealerWatch] Cast %s on %s (%s)", spellName, t.name, t.info) or format("[HealerWatch] Cast %s on %s", spellName, t.name);
 
         item:SetScript("OnMouseUp", function(self, button)
             if button ~= "LeftButton" then return; end
+            if GetTime() - lastWhisperTime < WHISPER_COOLDOWN then return; end
+            lastWhisperTime = GetTime();
             local recipient = previewActive and UnitName("player") or self.casterName;
             SendChatMessage(self.whisperMsg, "WHISPER", nil, recipient);
             HideContextMenu();
@@ -2217,6 +2295,8 @@ ShowCdRowRequestMenu = function(cdRow)
             end
         end
         if not best then return; end
+        if GetTime() - lastWhisperTime < WHISPER_COOLDOWN then return; end
+        lastWhisperTime = GetTime();
         local msg = format("[HealerWatch] Cast %s please", group.spellName);
         local recipient = previewActive and UnitName("player") or best.name;
         SendChatMessage(msg, "WHISPER", nil, recipient);
@@ -2301,6 +2381,8 @@ ShowCdRowRequestMenu = function(cdRow)
             elseif config.type == "cast" then
                 item:SetScript("OnMouseUp", function(self, button)
                     if button ~= "LeftButton" then return; end
+                    if GetTime() - lastWhisperTime < WHISPER_COOLDOWN then return; end
+                    lastWhisperTime = GetTime();
                     local msg = format("[HealerWatch] Cast %s please", group.spellName);
                     local recipient = previewActive and UnitName("player") or self.casterName;
                     SendChatMessage(msg, "WHISPER", nil, recipient);
@@ -2315,6 +2397,8 @@ ShowCdRowRequestMenu = function(cdRow)
                 if condMet then
                     item:SetScript("OnMouseUp", function(self, button)
                         if button ~= "LeftButton" then return; end
+                        if GetTime() - lastWhisperTime < WHISPER_COOLDOWN then return; end
+                        lastWhisperTime = GetTime();
                         local msg = format("[HealerWatch] Cast %s please", group.spellName);
                         local recipient = previewActive and UnitName("player") or self.casterName;
                         SendChatMessage(msg, "WHISPER", nil, recipient);
@@ -2659,12 +2743,27 @@ local function PrepareHealerRowData(sortedHealers)
     return maxNameWidth, maxManaWidth, maxStatusLabelWidth, maxStatusDurWidth;
 end
 
+-- Check if any Rebirth caster is alive and off cooldown
+local function IsRebirthAvailable()
+    local now = GetTime();
+    for _, entry in pairs(raidCooldowns) do
+        if entry.spellId == 20484 then
+            local guid = entry.sourceGUID;
+            if not IsCasterDead(guid) and entry.expiryTime <= now then
+                return true;
+            end
+        end
+    end
+    return false;
+end
+
 -- Render healer rows onto a target frame starting at yOffset; returns updated yOffset and totalWidth
 local function RenderHealerRows(targetFrame, yOffset, totalWidth, maxNameWidth, maxManaWidth, maxStatusLabelWidth, maxStatusDurWidth)
     local useIcons = db.statusIcons;
     local rowHeight = max(db.fontSize + 4, useIcons and (db.iconSize + 2) or 0, 16);
     local iconSize = db.iconSize;
     local iconGap = 3;
+    local rebirthReady = IsRebirthAvailable();
 
     for rowIdx, rd in ipairs(rowDataCache) do
         local data = rd.data;
@@ -2694,6 +2793,15 @@ local function RenderHealerRows(targetFrame, yOffset, totalWidth, maxNameWidth, 
             row.manaText:SetText(rd.manaStr);
             local mr, mg, mb = GetManaColor(data.manaPercent);
             row.manaText:SetTextColor(mr, mg, mb);
+        end
+
+        -- Dead pulse: dead healer without soulstone/rebirth buff, and a rebirth is available
+        if data.manaPercent == -2 and not data.hasSoulstone and not data.hasRebirth and rebirthReady then
+            row.needsRebirth = true;
+            row.deadPulse:Show();
+        else
+            row.needsRebirth = false;
+            row.deadPulse:Hide();
         end
 
         if useIcons then
@@ -3360,14 +3468,24 @@ BackgroundFrame:SetScript("OnUpdate", function(self, elapsed)
         end
 
         RefreshDisplay();
+
+        -- Safety net: ensure resize handles match hover state (OnLeave can miss at edges)
+        UpdateResizeHandleVisibility();
+        UpdateCdResizeHandleVisibility();
     end
 
-    -- Request pulse animation (runs every frame for smooth fade)
-    local pulseAlpha = (sin(GetTime() * 180) + 1) * 0.04;  -- 0 to 0.08, ~2s cycle
+    -- Pulse animations (runs every frame for smooth fade)
+    local pulseAlpha = (sin(GetTime() * 270) + 1) * 0.15 + 0.05;  -- 0.05 to 0.35, ~1.3s cycle
     for i = 1, #activeCdRows do
         local cdRow = activeCdRows[i];
         if cdRow.isRequest then
             cdRow.requestPulse:SetAlpha(pulseAlpha);
+        end
+    end
+    for i = 1, #activeRows do
+        local row = activeRows[i];
+        if row.needsRebirth then
+            row.deadPulse:SetAlpha(pulseAlpha);
         end
     end
 end);
@@ -3384,6 +3502,7 @@ local PREVIEW_DATA = {
     { name = "Potionboy", classFile = "PALADIN", baseMana = 55, hasPotion = true, driftSeed = 0.9 },
     { name = "Soulstoned", classFile = "PALADIN", hasSoulstone = true, driftSeed = 0 },
     { name = "Rebirthed", classFile = "PRIEST", hasRebirth = true, driftSeed = 0 },
+    { name = "Deadweight", classFile = "SHAMAN", driftSeed = 0 },  -- dead, no buffs (pulses when rebirth available)
 };
 
 StartPreview = function()
@@ -3424,6 +3543,19 @@ StartPreview = function()
             potionExpiry = td.hasPotion and (GetTime() + 90) or 0,
         };
     end
+
+    -- Inject mock group members (includes non-healers for Rebirth/Soulstone target lists)
+    wipe(previewGroupMembers);
+    -- All healers from PREVIEW_DATA
+    for i, td in ipairs(PREVIEW_DATA) do
+        local fakeGUID = "preview-guid-" .. i;
+        tinsert(previewGroupMembers, { guid = fakeGUID, name = td.name, classFile = td.classFile,
+            isDead = not td.baseMana, hasSoulstone = td.hasSoulstone or false, hasRebirth = td.hasRebirth or false });
+    end
+    -- Non-healer mock members
+    tinsert(previewGroupMembers, { guid = "preview-guid-dps1", name = "Stabsworth", classFile = "ROGUE", isDead = true, hasSoulstone = false, hasRebirth = false });
+    tinsert(previewGroupMembers, { guid = "preview-guid-dps2", name = "Arcanox", classFile = "MAGE", isDead = false, hasSoulstone = false, hasRebirth = false });
+    tinsert(previewGroupMembers, { guid = "preview-guid-tank1", name = "Meatshield", classFile = "WARRIOR", isDead = false, hasSoulstone = true, hasRebirth = false });
 
     -- Save and inject mock subgroups
     savedMemberSubgroups = {};
@@ -3570,6 +3702,8 @@ StopPreview = function()
         end
         savedHealers = nil;
     end
+
+    wipe(previewGroupMembers);
 
     -- Restore real raid cooldowns
     wipe(raidCooldowns);
