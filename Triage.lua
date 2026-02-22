@@ -51,7 +51,6 @@ local DEFAULT_SETTINGS = {
     cdPowerInfusion = true,
     cdSymbolOfHope = true,
     cdRebirth = true,
-    cdLayOnHands = true,
     cdSoulstone = true,
 };
 
@@ -60,6 +59,8 @@ local DEFAULT_SETTINGS = {
 --------------------------------------------------------------------------------
 
 local band = bit.band;
+local CombatLogGetCurrentEventInfo = CombatLogGetCurrentEventInfo;
+local GetPlayerInfoByGUID = GetPlayerInfoByGUID;
 
 --------------------------------------------------------------------------------
 -- Constants
@@ -212,17 +213,6 @@ RAID_COOLDOWN_SPELLS[20747] = rebirthInfo;  -- Rank 4
 RAID_COOLDOWN_SPELLS[20748] = rebirthInfo;  -- Rank 5
 RAID_COOLDOWN_SPELLS[26994] = rebirthInfo;  -- Rank 6
 
--- Lay on Hands (4 ranks, all same CD) — shared info referenced by each rank ID
-local layOnHandsInfo = {
-    name = GetSpellInfo(633) or "Lay on Hands",
-    icon = select(3, GetSpellInfo(633)) or 135928,
-    duration = 3600,
-};
-RAID_COOLDOWN_SPELLS[633]   = layOnHandsInfo;  -- Rank 1
-RAID_COOLDOWN_SPELLS[2800]  = layOnHandsInfo;  -- Rank 2
-RAID_COOLDOWN_SPELLS[10310] = layOnHandsInfo;  -- Rank 3
-RAID_COOLDOWN_SPELLS[27154] = layOnHandsInfo;  -- Rank 4
-
 -- Soulstone Resurrection (6 ranks, tracked via SPELL_AURA_APPLIED on target)
 -- When the buff is applied, the warlock's Create Soulstone is on CD for 30 min
 local soulstoneInfo = {
@@ -241,7 +231,6 @@ RAID_COOLDOWN_SPELLS[27239] = soulstoneInfo;  -- TBC
 local CANONICAL_SPELL_ID = {
     [20484] = 20484, [20739] = 20484, [20742] = 20484,
     [20747] = 20484, [20748] = 20484, [26994] = 20484,  -- Rebirth
-    [633] = 633, [2800] = 633, [10310] = 633, [27154] = 633,  -- Lay on Hands
     [20707] = 20707, [20762] = 20707, [20763] = 20707,
     [20764] = 20707, [20765] = 20707, [27239] = 20707,  -- Soulstone
 };
@@ -255,14 +244,13 @@ local COOLDOWN_SETTING_KEY = {
     [POWER_INFUSION_SPELL_ID]     = "cdPowerInfusion",
     [SYMBOL_OF_HOPE_SPELL_ID]     = "cdSymbolOfHope",
     [20484]                        = "cdRebirth",
-    [633]                          = "cdLayOnHands",
     [20707]                        = "cdSoulstone",
 };
 
 -- Class-baseline raid cooldowns (every member of the class has these)
 local CLASS_COOLDOWN_SPELLS = {
     ["DRUID"] = { INNERVATE_SPELL_ID, 20484 },                   -- Innervate, Rebirth
-    ["PALADIN"] = { 633 },                                        -- Lay on Hands
+    -- Paladin: no class-baseline cooldowns tracked
     ["WARLOCK"] = { 20707 },                                      -- Soulstone
     -- Shaman BL/Heroism handled separately (faction-dependent)
 };
@@ -270,7 +258,13 @@ local CLASS_COOLDOWN_SPELLS = {
 -- Talent-based cooldowns to check for player via IsSpellKnown
 local TALENT_COOLDOWN_SPELLS = {
     ["SHAMAN"] = { MANA_TIDE_CAST_SPELL_ID },
-    ["PRIEST"] = { POWER_INFUSION_SPELL_ID, SYMBOL_OF_HOPE_SPELL_ID },
+    ["PRIEST"] = { POWER_INFUSION_SPELL_ID },
+};
+
+-- Race-baseline cooldowns (seeded for all members of matching class+race)
+local RACE_COOLDOWN_SPELLS = {
+    -- Symbol of Hope is a Draenei Priest racial (all Draenei priests have it)
+    ["PRIEST-Draenei"] = { SYMBOL_OF_HOPE_SPELL_ID },
 };
 
 --------------------------------------------------------------------------------
@@ -292,6 +286,21 @@ local inspectRetries = {};       -- guid -> attempt count
 local INSPECT_MAX_RETRIES = 3;
 local INSPECT_REQUEUE_INTERVAL = 5.0;
 
+-- Addon communication for cross-zone cooldown sync
+local ADDON_MSG_PREFIX = "Triage";
+local playerGUID;
+
+-- Broadcaster election system
+local ADDON_VERSION = C_AddOns and C_AddOns.GetAddOnMetadata(addonName, "Version") or
+                      GetAddOnMetadata and GetAddOnMetadata(addonName, "Version") or "1.0.0";
+local triageUsers = {};           -- name -> { name, version, guid, unit, lastSeen, rank }
+local overrideBroadcaster = nil;  -- manual override target name (nil = auto-elect)
+local HEARTBEAT_INTERVAL = 30;
+local STALE_TIMEOUT = 90;
+local heartbeatElapsed = 0;
+local lastHelloTime = 0;
+local HELLO_REPLY_COOLDOWN = 5;
+
 -- Persistent healer row frames (never recycled)
 local activeRows = {};
 
@@ -310,6 +319,11 @@ local savedRaidCooldowns = nil;
 -- Spell-grouped cooldown cache
 local spellGroupCache = {};
 local sortedSpellGroupCache = {};
+local deadCache = {};
+
+-- Reusable scan tables
+local seenGUIDs = {};
+local syncParts = {};
 
 -- Subgroup tracking: guid -> subgroup number (1-8)
 local memberSubgroups = {};
@@ -348,6 +362,8 @@ local HideContextMenu;
 local ShowCooldownRequestMenu;
 local ShowCdRowRequestMenu;
 local ShowTargetSubmenu;
+local SyncFrame;
+local RefreshSyncFrame;
 
 --------------------------------------------------------------------------------
 -- Utility Functions
@@ -519,6 +535,77 @@ local function FormatStatusText(data)
 end
 
 --------------------------------------------------------------------------------
+-- Broadcaster Election
+--------------------------------------------------------------------------------
+
+local function GetPlayerRank(unit)
+    if IsInRaid() then
+        local raidIndex = tonumber(unit:match("(%d+)$"));
+        if raidIndex then
+            local _, rank = GetRaidRosterInfo(raidIndex);
+            if rank == 2 then return 2; end  -- leader
+            if rank == 1 then return 1; end  -- assistant
+        end
+        return 0;
+    else
+        if UnitIsGroupLeader(unit) then return 2; end
+        return 0;
+    end
+end
+
+local function RegisterSelf()
+    local name = UnitName("player");
+    if not name then return; end
+    local guid = UnitGUID("player");
+    local rank = 0;
+    -- Find our unit token in group for rank lookup
+    for _, u in ipairs(IterateGroupMembers()) do
+        if UnitIsUnit(u, "player") then
+            rank = GetPlayerRank(u);
+            break;
+        end
+    end
+    triageUsers[name] = {
+        name = name,
+        version = ADDON_VERSION,
+        guid = guid,
+        lastSeen = GetTime(),
+        rank = rank,
+    };
+end
+
+local function BroadcastHello()
+    if not IsInGroup() then return; end
+    local dist = IsInRaid() and "RAID" or "PARTY";
+    C_ChatInfo.SendAddonMessage(ADDON_MSG_PREFIX, "HELLO:" .. ADDON_VERSION, dist);
+    lastHelloTime = GetTime();
+end
+
+local function GetBroadcaster()
+    -- Manual override takes priority (if the target is still known)
+    if overrideBroadcaster and triageUsers[overrideBroadcaster] then
+        return overrideBroadcaster;
+    end
+
+    -- Deterministic election: highest rank wins, then alphabetical name
+    local best = nil;
+    for _, user in pairs(triageUsers) do
+        if not best then
+            best = user;
+        elseif user.rank > best.rank then
+            best = user;
+        elseif user.rank == best.rank and user.name < best.name then
+            best = user;
+        end
+    end
+    return best and best.name or UnitName("player");
+end
+
+local function IsBroadcaster()
+    return GetBroadcaster() == UnitName("player");
+end
+
+--------------------------------------------------------------------------------
 -- Healer Detection Engine
 --------------------------------------------------------------------------------
 
@@ -536,10 +623,10 @@ local function QueueInspect(unit)
         if entry.guid == guid then return; end
     end
 
-    -- Don't re-queue if we already know all their statuses
+    -- Don't re-queue if inspect is confirmed or class can't heal
     local data = healers[guid];
     if data then
-        if data.isHealer ~= nil or not HEALER_CAPABLE_CLASSES[data.classFile] then return; end
+        if data.inspectConfirmed or not HEALER_CAPABLE_CLASSES[data.classFile] then return; end
     end
 
     tinsert(inspectQueue, { unit = unit, guid = guid });
@@ -552,6 +639,7 @@ local function CheckSelfSpec()
     local _, classFile = UnitClass("player");
     if not HEALER_CAPABLE_CLASSES[classFile] then
         healers[guid].isHealer = false;
+        healers[guid].inspectConfirmed = true;
         return;
     end
 
@@ -577,6 +665,7 @@ local function CheckSelfSpec()
     end
 
     if maxPoints > 0 and primaryTab then
+        healers[guid].inspectConfirmed = true;
         if primaryRole == "HEALER" then
             healers[guid].isHealer = true;
         elseif primaryRole then
@@ -635,6 +724,7 @@ local function ProcessInspectResult(inspecteeGUID)
     end
 
     if maxPoints > 0 and primaryTab then
+        data.inspectConfirmed = true;
         if primaryRole == "HEALER" then
             data.isHealer = true;
         elseif primaryRole then
@@ -648,6 +738,7 @@ local function ProcessInspectResult(inspecteeGUID)
         if GetNumGroupMembers() <= 5 then
             data.isHealer = true;
         end
+        -- Don't mark inspectConfirmed — keep retrying
     end
 
     ClearInspectPlayer();
@@ -705,6 +796,8 @@ local function ProcessInspectQueue()
                     data.isHealer = false;
                 end
             end
+            -- Reset retries so we keep trying when they come in range
+            inspectRetries[guid] = 0;
         end
     end
 end
@@ -719,7 +812,7 @@ ScanGroupComposition = function()
     -- Don't wipe inspectRetries — preserve progress across roster updates
     -- Don't clear inspectPending — let in-flight inspect complete
 
-    local seenGUIDs = {};
+    wipe(seenGUIDs);
     local units = IterateGroupMembers();
 
     for _, unit in ipairs(units) do
@@ -749,6 +842,7 @@ ScanGroupComposition = function()
                     name = name or "Unknown",
                     classFile = classFile or "UNKNOWN",
                     isHealer = nil,
+                    inspectConfirmed = false,
                     manaPercent = 100,
                     isDrinking = false,
                     hasInnervate = false,
@@ -766,16 +860,28 @@ ScanGroupComposition = function()
             healers[guid].name = name or healers[guid].name;
             if classFile then healers[guid].classFile = classFile; end
 
-            if assignedHealer then
-                healers[guid].isHealer = true;
-            elseif not isCapable then
+            if not isCapable then
                 healers[guid].isHealer = false;
-            elseif healers[guid].isHealer == nil then
+                healers[guid].inspectConfirmed = true;
+            elseif not healers[guid].inspectConfirmed then
                 -- Self: check directly, others: queue inspect
                 if UnitIsUnit(unit, "player") then
                     CheckSelfSpec();
                 else
-                    QueueInspect(unit);
+                    -- Provisional display while waiting for talent inspect:
+                    -- 5-man: assume healer-capable = healer
+                    -- Raid: use assigned role as hint (better than showing nothing)
+                    if healers[guid].isHealer == nil then
+                        if GetNumGroupMembers() <= 5 then
+                            healers[guid].isHealer = true;
+                        elseif assignedHealer then
+                            healers[guid].isHealer = true;
+                        end
+                    end
+                    -- Only queue inspect if unit is visible (in range)
+                    if UnitIsVisible(unit) then
+                        QueueInspect(unit);
+                    end
                 end
             end
         end
@@ -801,6 +907,46 @@ ScanGroupComposition = function()
         end
     end
 
+    -- Remove triageUsers entries for players who left
+    for uname, udata in pairs(triageUsers) do
+        if udata.guid and not seenGUIDs[udata.guid] then
+            triageUsers[uname] = nil;
+            if overrideBroadcaster == uname then
+                overrideBroadcaster = nil;
+            end
+        end
+    end
+
+    -- Helper: seed a single cooldown entry; for the local player, check GetSpellCooldown()
+    local function SeedCooldown(guid, name, classFile, spellId, unit)
+        local canonical = CANONICAL_SPELL_ID[spellId] or spellId;
+        local key = guid .. "-" .. canonical;
+        if raidCooldowns[key] then return; end
+
+        local cdInfo = RAID_COOLDOWN_SPELLS[spellId];
+        if not cdInfo then return; end
+
+        local expiryTime = 0;  -- default: "Ready"
+
+        -- For the local player, check actual cooldown state
+        if unit and UnitIsUnit(unit, "player") then
+            local start, dur = GetSpellCooldown(spellId);
+            if start and start > 0 and dur and dur > 1.5 then  -- ignore GCD
+                expiryTime = start + dur;
+            end
+        end
+
+        raidCooldowns[key] = {
+            sourceGUID = guid,
+            name = name or "Unknown",
+            classFile = classFile or "UNKNOWN",
+            spellId = canonical,
+            icon = cdInfo.icon,
+            spellName = cdInfo.name,
+            expiryTime = expiryTime,
+        };
+    end
+
     -- Seed "Ready" cooldowns for class-baseline abilities
     for _, unit in ipairs(units) do
         local guid = UnitGUID(unit);
@@ -812,22 +958,7 @@ ScanGroupComposition = function()
             local spells = CLASS_COOLDOWN_SPELLS[classFile];
             if spells then
                 for _, spellId in ipairs(spells) do
-                    local canonical = CANONICAL_SPELL_ID[spellId] or spellId;
-                    local key = guid .. "-" .. canonical;
-                    if not raidCooldowns[key] then
-                        local cdInfo = RAID_COOLDOWN_SPELLS[spellId];
-                        if cdInfo then
-                            raidCooldowns[key] = {
-                                sourceGUID = guid,
-                                name = name or "Unknown",
-                                classFile = classFile or "UNKNOWN",
-                                spellId = canonical,
-                                icon = cdInfo.icon,
-                                spellName = cdInfo.name,
-                                expiryTime = 0,
-                            };
-                        end
-                    end
+                    SeedCooldown(guid, name, classFile, spellId, unit);
                 end
             end
 
@@ -835,19 +966,16 @@ ScanGroupComposition = function()
             if classFile == "SHAMAN" then
                 local faction = UnitFactionGroup(unit);
                 local blSpellId = (faction == "Horde") and BLOODLUST_SPELL_ID or HEROISM_SPELL_ID;
-                local key = guid .. "-" .. blSpellId;
-                if not raidCooldowns[key] then
-                    local cdInfo = RAID_COOLDOWN_SPELLS[blSpellId];
-                    if cdInfo then
-                        raidCooldowns[key] = {
-                            sourceGUID = guid,
-                            name = name or "Unknown",
-                            classFile = classFile,
-                            spellId = blSpellId,
-                            icon = cdInfo.icon,
-                            spellName = cdInfo.name,
-                            expiryTime = 0,
-                        };
+                SeedCooldown(guid, name, classFile, blSpellId, unit);
+            end
+
+            -- Race-baseline cooldowns (e.g., Symbol of Hope for Draenei Priests)
+            local _, raceFile = UnitRace(unit);
+            if raceFile and classFile then
+                local raceSpells = RACE_COOLDOWN_SPELLS[classFile .. "-" .. raceFile];
+                if raceSpells then
+                    for _, spellId in ipairs(raceSpells) do
+                        SeedCooldown(guid, name, classFile, spellId, unit);
                     end
                 end
             end
@@ -858,25 +986,30 @@ ScanGroupComposition = function()
                 if talentSpells then
                     for _, spellId in ipairs(talentSpells) do
                         if IsSpellKnown(spellId) then
-                            local key = guid .. "-" .. spellId;
-                            if not raidCooldowns[key] then
-                                local cdInfo = RAID_COOLDOWN_SPELLS[spellId];
-                                if cdInfo then
-                                    raidCooldowns[key] = {
-                                        sourceGUID = guid,
-                                        name = name or "Unknown",
-                                        classFile = classFile or "UNKNOWN",
-                                        spellId = spellId,
-                                        icon = cdInfo.icon,
-                                        spellName = cdInfo.name,
-                                        expiryTime = 0,
-                                    };
-                                end
-                            end
+                            SeedCooldown(guid, name, classFile, spellId, unit);
                         end
                     end
                 end
             end
+        end
+    end
+
+    -- Broadcast our cooldown states to the group so cross-zone members get accurate data
+    if playerGUID and IsInGroup() then
+        wipe(syncParts);
+        for key, entry in pairs(raidCooldowns) do
+            if entry.sourceGUID == playerGUID then
+                local remaining = 0;
+                if entry.expiryTime > 0 then
+                    remaining = floor(entry.expiryTime - GetTime());
+                    if remaining < 0 then remaining = 0; end
+                end
+                tinsert(syncParts, format("%d:%d", entry.spellId, remaining));
+            end
+        end
+        if #syncParts > 0 then
+            local dist = IsInRaid() and "RAID" or "PARTY";
+            C_ChatInfo.SendAddonMessage(ADDON_MSG_PREFIX, "SYNC:" .. table.concat(syncParts, ","), dist);
         end
     end
 
@@ -910,7 +1043,7 @@ local function GroupCooldownsBySpell()
     wipe(sortedSpellGroupCache);
 
     -- Cache dead status per GUID to avoid repeated group scans
-    local deadCache = {};
+    wipe(deadCache);
 
     for _, entry in pairs(raidCooldowns) do
         local sid = entry.spellId;
@@ -1099,6 +1232,11 @@ local function ProcessCombatLog()
                     expiryTime = GetTime() + cdInfo.duration,
                     lastCastTime = GetTime(),
                 };
+                -- Broadcast to group if this is the player's own cast
+                if sourceGUID == playerGUID and IsInGroup() then
+                    local dist = IsInRaid() and "RAID" or "PARTY";
+                    C_ChatInfo.SendAddonMessage(ADDON_MSG_PREFIX, format("CD:%d:%d", canonical, cdInfo.duration), dist);
+                end
             end
         elseif subevent == "SPELL_AURA_APPLIED" and SOULSTONE_BUFF_IDS[spellId] then
             -- Soulstone: source is the warlock, dest gets the buff
@@ -1116,6 +1254,11 @@ local function ProcessCombatLog()
                     expiryTime = GetTime() + cdInfo.duration,
                     lastCastTime = GetTime(),
                 };
+                -- Broadcast to group if this is the player's own cast
+                if sourceGUID == playerGUID and IsInGroup() then
+                    local dist = IsInRaid() and "RAID" or "PARTY";
+                    C_ChatInfo.SendAddonMessage(ADDON_MSG_PREFIX, format("CD:%d:%d", canonical, cdInfo.duration), dist);
+                end
             end
             -- Mark the healer who received the soulstone
             if destGUID then
@@ -1155,6 +1298,7 @@ end
 local function CheckManaWarnings()
     if not db.sendWarnings then return; end
     if not IsInGroup() then return; end
+    if not IsBroadcaster() then return; end
 
     local now = GetTime();
     if now - lastWarningTime < db.warningCooldown then return; end
@@ -1585,12 +1729,11 @@ local CD_REQUEST_CONFIG = {
     [BLOODLUST_SPELL_ID]        = { type = "cast" },
     [HEROISM_SPELL_ID]          = { type = "cast" },
     [INNERVATE_SPELL_ID]        = { type = "target", filter = "low_mana",  threshold = 50 },
-    [633]                       = { type = "target", filter = "low_health", threshold = 30 },  -- Lay on Hands
     [POWER_INFUSION_SPELL_ID]   = { type = "target", filter = "dps_mana" },
     [20484]                     = { type = "target", filter = "dead" },                         -- Rebirth
     [20707]                     = { type = "target", filter = "alive_no_soulstone" },             -- Soulstone
     [MANA_TIDE_CAST_SPELL_ID]   = { type = "conditional_cast", condition = "subgroup_low_mana", threshold = 20 },
-    [SYMBOL_OF_HOPE_SPELL_ID]   = { type = "conditional_cast", condition = "subgroup_low_mana", threshold = 20 },
+    [SYMBOL_OF_HOPE_SPELL_ID]   = { type = "cast" },
 };
 
 -- Check if any healer in the caster's subgroup has mana <= threshold% (excluding caster)
@@ -2177,6 +2320,185 @@ ShowCdRowRequestMenu = function(cdRow)
     contextMenuFrame:Show();
     contextMenuFrame:RegisterEvent("GLOBAL_MOUSE_DOWN");
     contextMenuVisible = true;
+end
+
+--------------------------------------------------------------------------------
+-- Sync Window (Broadcaster Election UI)
+--------------------------------------------------------------------------------
+
+do
+    local SYNC_ROW_HEIGHT = 20;
+    local SYNC_PADDING = 10;
+    local SYNC_WIDTH = 260;
+
+    local frame = CreateFrame("Frame", "TriageSyncFrame", UIParent, "BackdropTemplate");
+    frame:SetSize(SYNC_WIDTH, 140);
+    frame:SetFrameStrata("DIALOG");
+    frame:SetBackdrop({
+        bgFile = "Interface\\ChatFrame\\ChatFrameBackground",
+        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+        tile = true, tileSize = 16, edgeSize = 16,
+        insets = { left = 4, right = 4, top = 4, bottom = 4 },
+    });
+    frame:SetBackdropColor(0.05, 0.05, 0.05, 0.92);
+    frame:SetBackdropBorderColor(0.4, 0.4, 0.4, 1);
+    frame:SetClampedToScreen(true);
+    frame:SetMovable(true);
+    frame:EnableMouse(true);
+    frame:RegisterForDrag("LeftButton");
+    frame:SetScript("OnDragStart", function(self) self:StartMoving(); end);
+    frame:SetScript("OnDragStop", function(self) self:StopMovingOrSizing(); end);
+    frame:SetPoint("CENTER", UIParent, "CENTER", 0, 100);
+    frame:Hide();
+
+    -- Title
+    local title = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge");
+    title:SetPoint("TOPLEFT", SYNC_PADDING, -SYNC_PADDING);
+    title:SetText("Triage Sync");
+
+    -- Close button
+    local closeBtn = CreateFrame("Button", nil, frame, "UIPanelCloseButton");
+    closeBtn:SetPoint("TOPRIGHT", -2, -2);
+    closeBtn:SetScript("OnClick", function() frame:Hide(); end);
+
+    -- Status line at bottom
+    local statusText = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall");
+    statusText:SetPoint("BOTTOMLEFT", SYNC_PADDING, SYNC_PADDING + 26);
+    statusText:SetJustifyH("LEFT");
+
+    -- Auto-Elect button at bottom
+    local autoBtn = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate");
+    autoBtn:SetSize(100, 22);
+    autoBtn:SetPoint("BOTTOMLEFT", SYNC_PADDING, SYNC_PADDING);
+    autoBtn:SetText("Auto-Elect");
+    autoBtn:SetScript("OnClick", function()
+        overrideBroadcaster = nil;
+        if IsInGroup() then
+            local dist = IsInRaid() and "RAID" or "PARTY";
+            C_ChatInfo.SendAddonMessage(ADDON_MSG_PREFIX, "OVERRIDE:CLEAR", dist);
+        end
+        RefreshSyncFrame();
+    end);
+
+    -- Row pool
+    local rows = {};
+
+    local function GetRow(index)
+        if rows[index] then return rows[index]; end
+        local row = CreateFrame("Button", nil, frame);
+        row:SetHeight(SYNC_ROW_HEIGHT);
+
+        row.indicator = row:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall");
+        row.indicator:SetPoint("LEFT", 0, 0);
+        row.indicator:SetWidth(16);
+        row.indicator:SetJustifyH("LEFT");
+
+        row.nameText = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall");
+        row.nameText:SetPoint("LEFT", row.indicator, "RIGHT", 2, 0);
+        row.nameText:SetJustifyH("LEFT");
+
+        row.versionText = row:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall");
+        row.versionText:SetPoint("LEFT", row.nameText, "RIGHT", 6, 0);
+        row.versionText:SetJustifyH("LEFT");
+
+        row.rankText = row:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall");
+        row.rankText:SetPoint("RIGHT", -60, 0);
+        row.rankText:SetJustifyH("RIGHT");
+
+        row.setBtn = CreateFrame("Button", nil, row, "UIPanelButtonTemplate");
+        row.setBtn:SetSize(44, 18);
+        row.setBtn:SetPoint("RIGHT", 0, 0);
+        row.setBtn:SetText("Set");
+
+        rows[index] = row;
+        return row;
+    end
+
+    RefreshSyncFrame = function()
+        if not frame:IsShown() then return; end
+
+        -- Collect and sort users: broadcaster first, then by rank desc, then alphabetical
+        local sorted = {};
+        for _, user in pairs(triageUsers) do
+            tinsert(sorted, user);
+        end
+        sort(sorted, function(a, b)
+            if a.rank ~= b.rank then return a.rank > b.rank; end
+            return a.name < b.name;
+        end);
+
+        local broadcaster = GetBroadcaster();
+        local isManual = (overrideBroadcaster and triageUsers[overrideBroadcaster]) and true or false;
+        local playerName = UnitName("player");
+        local yOff = -(SYNC_PADDING + 24);  -- below title
+
+        for i, user in ipairs(sorted) do
+            local row = GetRow(i);
+            row:SetPoint("TOPLEFT", frame, "TOPLEFT", SYNC_PADDING, yOff);
+            row:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -SYNC_PADDING, yOff);
+            yOff = yOff - SYNC_ROW_HEIGHT;
+
+            -- Broadcaster indicator
+            if user.name == broadcaster then
+                row.indicator:SetText("|cff00ff00>|r");
+            else
+                row.indicator:SetText("");
+            end
+
+            -- Class-colored name
+            local classFile;
+            if user.guid then
+                _, classFile = GetPlayerInfoByGUID(user.guid);
+            end
+            if classFile then
+                local r, g, b = GetClassColor(classFile);
+                row.nameText:SetTextColor(r, g, b);
+            else
+                row.nameText:SetTextColor(1, 1, 1);
+            end
+            row.nameText:SetText(user.name);
+
+            -- Version
+            row.versionText:SetText("v" .. (user.version or "?"));
+
+            -- Rank indicator
+            local rankLabel = "";
+            if user.rank == 2 then rankLabel = "Leader";
+            elseif user.rank == 1 then rankLabel = "Assist";
+            end
+            row.rankText:SetText(rankLabel);
+
+            -- Set button
+            row.setBtn:SetScript("OnClick", function()
+                overrideBroadcaster = user.name;
+                if IsInGroup() then
+                    local dist = IsInRaid() and "RAID" or "PARTY";
+                    C_ChatInfo.SendAddonMessage(ADDON_MSG_PREFIX, "OVERRIDE:" .. user.name, dist);
+                end
+                RefreshSyncFrame();
+            end);
+
+            row:Show();
+        end
+
+        -- Hide unused rows
+        for i = #sorted + 1, #rows do
+            rows[i]:Hide();
+        end
+
+        -- Status line
+        if broadcaster == playerName then
+            statusText:SetText("|cff00ff00You|r are broadcasting" .. (isManual and " (manual)" or " (auto)"));
+        else
+            statusText:SetText("Broadcaster: |cffffd100" .. broadcaster .. "|r" .. (isManual and " (manual)" or " (auto)"));
+        end
+
+        -- Resize frame to fit content
+        local contentHeight = SYNC_PADDING + 24 + (#sorted * SYNC_ROW_HEIGHT) + 8 + 14 + 4 + 22 + SYNC_PADDING;
+        frame:SetHeight(max(contentHeight, 100));
+    end
+
+    SyncFrame = frame;
 end
 
 --------------------------------------------------------------------------------
@@ -2891,14 +3213,37 @@ BackgroundFrame:SetScript("OnUpdate", function(self, elapsed)
             inspectElapsed = 0;
             if #inspectQueue == 0 and not inspectPending then
                 for guid, data in pairs(healers) do
-                    if data.unit and UnitExists(data.unit) then
-                        if data.isHealer == nil and HEALER_CAPABLE_CLASSES[data.classFile] then
+                    if data.unit and UnitExists(data.unit) and UnitIsVisible(data.unit) then
+                        if not data.inspectConfirmed and HEALER_CAPABLE_CLASSES[data.classFile] then
                             QueueInspect(data.unit);
                         end
                     end
                 end
             end
             ProcessInspectQueue();
+        end
+    end
+
+    -- Broadcaster heartbeat + stale pruning
+    if not previewActive then
+        heartbeatElapsed = heartbeatElapsed + elapsed;
+        if heartbeatElapsed >= HEARTBEAT_INTERVAL then
+            heartbeatElapsed = 0;
+            RegisterSelf();
+            if IsInGroup() then
+                BroadcastHello();
+            end
+            -- Prune stale triageUsers
+            local now = GetTime();
+            local playerName = UnitName("player");
+            for uname, udata in pairs(triageUsers) do
+                if uname ~= playerName and now - udata.lastSeen > STALE_TIMEOUT then
+                    triageUsers[uname] = nil;
+                    if overrideBroadcaster == uname then
+                        overrideBroadcaster = nil;
+                    end
+                end
+            end
         end
     end
 
@@ -2985,6 +3330,7 @@ StartPreview = function()
             name = td.name,
             classFile = td.classFile,
             isHealer = true,
+            inspectConfirmed = true,
             manaPercent = td.baseMana or -2,
             baseMana = td.baseMana,
             driftSeed = td.driftSeed,
@@ -3075,15 +3421,6 @@ StartPreview = function()
         spellId = 20707,
         icon = soulstoneInfo.icon,
         spellName = soulstoneInfo.name,
-        expiryTime = now - 1,  -- starts as "Ready"
-    };
-    raidCooldowns["preview-loh"] = {
-        sourceGUID = "preview-guid-3",
-        name = "Palaheals",
-        classFile = "PALADIN",
-        spellId = 633,
-        icon = layOnHandsInfo.icon,
-        spellName = layOnHandsInfo.name,
         expiryTime = now - 1,  -- starts as "Ready"
     };
     local piInfo = RAID_COOLDOWN_SPELLS[POWER_INFUSION_SPELL_ID];
@@ -3324,9 +3661,6 @@ local function RegisterSettings()
     AddCheckbox("cdInnervate", "Innervate",
         "Track Innervate cooldowns in the cooldown section.");
 
-    AddCheckbox("cdLayOnHands", "Lay on Hands",
-        "Track Lay on Hands cooldowns in the cooldown section.");
-
     AddCheckbox("cdManaTide", "Mana Tide",
         "Track Mana Tide Totem cooldowns in the cooldown section.");
 
@@ -3417,7 +3751,7 @@ local function RegisterSettings()
     layout:AddInitializer(CreateSettingsListSectionHeaderInitializer("Chat Warnings"));
 
     local sendWarnInit = AddCheckbox("sendWarnings", "Send Warning Messages",
-        "Send a chat warning to party/raid when average healer mana drops below the warning threshold.");
+        "Send a chat warning to party/raid when average healer mana drops below the warning threshold. When multiple players have Triage, only the elected broadcaster sends warnings. Use /tr sync to see the broadcaster.");
 
     local warnCdInit = AddSlider("warningCooldown", "Warning Cooldown (sec)",
         "After a warning is sent, wait at least this many seconds before sending another. Prevents chat spam during sustained low mana.",
@@ -3515,15 +3849,31 @@ local function OnEvent(self, event, ...)
         UpdateResizeHandleVisibility();
 
         self:UnregisterEvent("ADDON_LOADED");
+
+        -- Register addon message prefix for cross-zone cooldown sync
+        C_ChatInfo.RegisterAddonMessagePrefix(ADDON_MSG_PREFIX);
+
         print("|cff00ff00Triage|r loaded. Type |cff00ffff/triage|r or visit Options > AddOns.");
 
     elseif event == "PLAYER_LOGIN" then
+        playerGUID = UnitGUID("player");
+        RegisterSelf();
         if IsInGroup() then
             ScanGroupComposition();
+            BroadcastHello();
         end
 
     elseif event == "GROUP_ROSTER_UPDATE" or event == "PLAYER_ENTERING_WORLD" then
         ScanGroupComposition();
+        if IsInGroup() then
+            RegisterSelf();
+            BroadcastHello();
+        else
+            -- Solo: wipe triageUsers, keep only self
+            wipe(triageUsers);
+            overrideBroadcaster = nil;
+            RegisterSelf();
+        end
 
     elseif event == "PLAYER_ROLES_ASSIGNED" then
         -- Re-check roles; someone may have been assigned healer
@@ -3568,6 +3918,124 @@ local function OnEvent(self, event, ...)
 
     elseif event == "COMBAT_LOG_EVENT_UNFILTERED" then
         ProcessCombatLog();
+
+    elseif event == "CHAT_MSG_ADDON" then
+        local prefix, addonMsg, channel, sender = ...;
+        if prefix ~= ADDON_MSG_PREFIX then return; end
+
+        local senderName = Ambiguate(sender, "short");
+        local isSelf = (senderName == UnitName("player"));
+
+        -- Handle HELLO (from others only — we register ourselves locally)
+        local helloVersion = addonMsg:match("^HELLO:(.+)$");
+        if helloVersion and not isSelf then
+            -- Find sender's rank from group
+            local senderRank = 0;
+            local senderGUID2;
+            for _, u in ipairs(IterateGroupMembers()) do
+                if UnitName(u) == senderName then
+                    senderRank = GetPlayerRank(u);
+                    senderGUID2 = UnitGUID(u);
+                    break;
+                end
+            end
+            triageUsers[senderName] = {
+                name = senderName,
+                version = helloVersion,
+                guid = senderGUID2,
+                lastSeen = GetTime(),
+                rank = senderRank,
+            };
+            -- Reply with our own HELLO if we haven't sent one recently
+            if GetTime() - lastHelloTime > HELLO_REPLY_COOLDOWN then
+                BroadcastHello();
+            end
+            if RefreshSyncFrame then RefreshSyncFrame(); end
+            return;
+        end
+
+        -- Handle OVERRIDE (from anyone in group)
+        local overrideTarget = addonMsg:match("^OVERRIDE:(.+)$");
+        if overrideTarget and not isSelf then
+            if overrideTarget == "CLEAR" then
+                overrideBroadcaster = nil;
+            else
+                overrideBroadcaster = overrideTarget;
+            end
+            if RefreshSyncFrame then RefreshSyncFrame(); end
+            return;
+        end
+
+        -- Ignore other messages from self (we already tracked locally)
+        if isSelf then return; end
+
+        -- Find the sender's GUID from group members
+        local senderGUID;
+        for _, unit in ipairs(IterateGroupMembers()) do
+            if UnitName(unit) == senderName then
+                senderGUID = UnitGUID(unit);
+                break;
+            end
+        end
+        if not senderGUID then return; end
+
+        local _, engClass = GetPlayerInfoByGUID(senderGUID);
+
+        -- "CD:spellId:duration" — single cooldown just cast
+        local cdSpellStr, cdDurStr = addonMsg:match("^CD:(%d+):(%d+)$");
+        if cdSpellStr then
+            local spellId = tonumber(cdSpellStr);
+            local duration = tonumber(cdDurStr);
+            if spellId and duration then
+                local cdInfo = RAID_COOLDOWN_SPELLS[spellId];
+                if cdInfo then
+                    local canonical = CANONICAL_SPELL_ID[spellId] or spellId;
+                    local key = senderGUID .. "-" .. canonical;
+                    raidCooldowns[key] = {
+                        sourceGUID = senderGUID,
+                        name = senderName,
+                        classFile = engClass or "UNKNOWN",
+                        spellId = canonical,
+                        icon = cdInfo.icon,
+                        spellName = cdInfo.name,
+                        expiryTime = GetTime() + duration,
+                        lastCastTime = GetTime(),
+                    };
+                end
+            end
+            return;
+        end
+
+        -- "SYNC:spellId1:remaining1,spellId2:remaining2,..." — bulk state update
+        local syncData = addonMsg:match("^SYNC:(.+)$");
+        if syncData then
+            local now = GetTime();
+            for entry in syncData:gmatch("[^,]+") do
+                local spellIdStr, remainStr = entry:match("^(%d+):(%d+)$");
+                if spellIdStr then
+                    local spellId = tonumber(spellIdStr);
+                    local remaining = tonumber(remainStr);
+                    if spellId and remaining then
+                        local cdInfo = RAID_COOLDOWN_SPELLS[spellId];
+                        if cdInfo then
+                            local canonical = CANONICAL_SPELL_ID[spellId] or spellId;
+                            local key = senderGUID .. "-" .. canonical;
+                            local expiryTime = (remaining > 0) and (now + remaining) or 0;
+                            raidCooldowns[key] = {
+                                sourceGUID = senderGUID,
+                                name = senderName,
+                                classFile = engClass or "UNKNOWN",
+                                spellId = canonical,
+                                icon = cdInfo.icon,
+                                spellName = cdInfo.name,
+                                expiryTime = expiryTime,
+                            };
+                        end
+                    end
+                end
+            end
+            return;
+        end
     end
 end
 
@@ -3583,6 +4051,7 @@ EventFrame:RegisterEvent("UNIT_AURA");
 EventFrame:RegisterEvent("PLAYER_REGEN_DISABLED");
 EventFrame:RegisterEvent("PLAYER_REGEN_ENABLED");
 EventFrame:RegisterEvent("COMBAT_LOG_EVENT_UNFILTERED");
+EventFrame:RegisterEvent("CHAT_MSG_ADDON");
 
 --------------------------------------------------------------------------------
 -- Slash Commands
@@ -3653,11 +4122,21 @@ local function SlashCommandHandler(msg)
         db.cdFrameHeight = nil;
         print("|cff00ff00Triage|r settings reset to defaults.");
 
+    elseif msg == "sync" then
+        RegisterSelf();
+        if SyncFrame:IsShown() then
+            SyncFrame:Hide();
+        else
+            SyncFrame:Show();
+            RefreshSyncFrame();
+        end
+
     elseif msg == "help" then
         print("|cff00ff00Triage|r commands:");
         print("  |cff00ffff/triage|r - Open Options > AddOns > Triage");
         print("  |cff00ffff/triage lock|r - Toggle frame lock");
         print("  |cff00ffff/triage test|r - Show test healer data");
+        print("  |cff00ffff/triage sync|r - Show broadcaster sync window");
         print("  |cff00ffff/triage reset|r - Reset to defaults");
         print("  |cff00ffff/triage help|r - Show this help");
 

@@ -1,5 +1,7 @@
 # Triage
 
+> **Early Release** - This addon is currently experimental and may have bugs. It is being actively developed and improved. If you encounter any issues or have suggestions, please post a comment on the addon page - your feedback helps!
+
 **Triage** tracks healer mana and raid cooldowns in group content. Automatically detects healers via role assignment and talent inspection, displays color-coded mana bars with status indicators, and monitors key cooldowns like Innervate, Rebirth, Bloodlust, and more with ready/countdown timers.
 
 Built specifically for **TBC Classic Anniversary**.
@@ -14,11 +16,13 @@ Built specifically for **TBC Classic Anniversary**.
 - **Status indicators** - Shows when healers are Drinking, have Innervate, Symbol of Hope, or Mana Tide Totem active, with optional durations. Text or icon display modes.
 - **Potion tracking** - Tracks potion cooldowns (2 min) via combat log
 - **Soulstone indicator** - Purple "SS" on dead healers who have a soulstone
-- **Raid cooldown tracking** - Monitors Innervate, Mana Tide, Bloodlust/Heroism, Power Infusion, Rebirth, Lay on Hands, Soulstone, and Symbol of Hope. Shows "Ready" or countdown timer per caster. Each cooldown individually toggleable.
+- **Raid cooldown tracking** - Monitors Innervate, Mana Tide, Bloodlust/Heroism, Power Infusion, Rebirth, Soulstone, and Symbol of Hope. Shows "Ready" or countdown timer per caster. Each cooldown individually toggleable.
 - **Cooldown display modes** - Text only, icons only, or icons with labels
 - **Click-to-request cooldowns** - Click a healer row or cooldown row to whisper a request
 - **Dead/DC detection** - Grey indicators for dead or disconnected healers
 - **Chat warnings** - Optional automatic warnings to party/raid when healer mana drops below a configurable threshold
+- **Single-broadcaster election** - When multiple players have Triage, only one sends chat warnings. Auto-elected by rank (leader > assist > alphabetical), with manual override via `/tr sync`
+- **Cross-zone cooldown sync** - Triage users share cooldown states via addon messages, keeping timers accurate even when group members are in different zones
 - **Sorting** - Sort healers by lowest mana first or alphabetically
 - **Split or merged display** - Raid cooldowns in their own independently movable frame or combined with healer mana
 - **Resizable frames** - Drag the corner handle to resize (appears on hover when unlocked)
@@ -36,6 +40,7 @@ Type `/triage` to open the options panel.
 - `/triage` - Open options panel
 - `/triage lock` - Toggle frame lock (drag to reposition when unlocked)
 - `/triage test` - Show test data to preview the display
+- `/triage sync` - Open broadcaster sync window (see who has Triage and who broadcasts warnings)
 - `/triage reset` - Reset all settings to defaults
 - `/triage help` - Show available commands
 - `/tr` - Short alias for all commands above
@@ -59,7 +64,7 @@ Type `/triage` to open the options panel.
 
 **Raid Cooldowns**
 - Show/hide raid cooldown section
-- Per-cooldown toggles (Innervate, Mana Tide, Bloodlust/Heroism, Power Infusion, Symbol of Hope, Rebirth, Lay on Hands, Soulstone)
+- Per-cooldown toggles (Innervate, Mana Tide, Bloodlust/Heroism, Power Infusion, Symbol of Hope, Rebirth, Soulstone)
 - Display mode: text, icons, or icons with labels
 - Icon size
 - Split cooldowns into separate frame
@@ -75,6 +80,7 @@ Type `/triage` to open the options panel.
 - Enable/Disable warning messages
 - Mana threshold percentage
 - Warning cooldown (seconds)
+- Broadcaster status and sync window button (when multiple Triage users are present)
 
 **Mana Color Thresholds**
 - Green, yellow, and orange percentage thresholds

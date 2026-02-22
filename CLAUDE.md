@@ -2,22 +2,23 @@
 
 ## Overview
 
-Triage is a WoW Classic Anniversary Edition addon that tracks healer mana in group content. It automatically detects healers via talent inspection (since role assignment is unreliable in Classic) and displays their mana percentages with color coding and status indicators. It also tracks raid-wide cooldowns (Innervate, Mana Tide, Bloodlust/Heroism, Power Infusion, Rebirth, Lay on Hands, Soulstone, Symbol of Hope) via combat log.
+Triage is a WoW Classic Anniversary Edition addon that tracks healer mana in group content. It automatically detects healers via talent inspection (since role assignment is unreliable in Classic) and displays their mana percentages with color coding and status indicators. It also tracks raid-wide cooldowns (Innervate, Mana Tide, Bloodlust/Heroism, Power Infusion, Rebirth, Soulstone, Symbol of Hope) via combat log.
 
 ## Architecture
 
-**Single-file addon** — all logic in `Triage.lua` (~3840 lines). No XML, no external dependencies.
+**Single-file addon** — all logic in `Triage.lua` (~4150 lines). No XML, no external dependencies.
 
 ### Key Systems
 
 1. **Healer Detection Engine** (layered approach):
-   - Layer 1: `UnitGroupRolesAssigned()` — trusts assigned roles
-   - Layer 2: Class filter — only Priest/Druid/Paladin/Shaman can heal
-   - Layer 3: Talent inspection via `C_SpecializationInfo.GetSpecializationInfo()` — checks `role` field first, falls back to `HEALING_TALENT_TABS` mapping when `role` is nil (which is the norm in Classic Anniversary). 5-man fallback assumes healer-capable classes are healers if API returns no data.
+   - Layer 1: Class filter — only Priest/Druid/Paladin/Shaman can heal
+   - Layer 2: Talent inspection via `C_SpecializationInfo.GetSpecializationInfo()` — checks `role` field first, falls back to `HEALING_TALENT_TABS` mapping when `role` is nil (which is the norm in Classic Anniversary). Tracks `inspectConfirmed` flag per member; only re-queues unconfirmed members.
+   - Layer 3: Provisional display — 5-man assumes healer-capable = healer; raids use `UnitGroupRolesAssigned()` as a hint while waiting for inspect.
+   - Only queues inspects for visible units (`UnitIsVisible()`); resets retry count when out-of-range so they're re-queued on proximity.
 
 2. **Inspection Queue** — async system that queues `NotifyInspect()` calls with 2.5s cooldown, pauses in combat, validates range via `CanInspect()`. Runs on a separate `BackgroundFrame` (always shown) to avoid the hidden-frame OnUpdate deadlock. Periodically re-queues unresolved members.
 
-3. **Raid Cooldown Tracker** — monitors `SPELL_CAST_SUCCESS` (and `SPELL_AURA_APPLIED` for Soulstone) in combat log for key raid cooldowns. Class-baseline cooldowns (Innervate, Rebirth, Lay on Hands, Soulstone, Bloodlust/Heroism) are pre-seeded as "Ready" on group scan; player talent cooldowns (Mana Tide, Power Infusion) detected via `IsSpellKnown()`. Multi-rank spells use canonical spell IDs for consistent keys. Displays with class-colored caster names, spell names, and countdown timers (or green "Ready"). Supports text, icon, and icon+label display modes.
+3. **Raid Cooldown Tracker** — monitors `SPELL_CAST_SUCCESS` (and `SPELL_AURA_APPLIED` for Soulstone) in combat log for key raid cooldowns. Three seeding tiers: class-baseline (Innervate, Rebirth, Soulstone, Bloodlust/Heroism), race-baseline via `RACE_COOLDOWN_SPELLS` (Symbol of Hope for Draenei Priests), and player talent cooldowns (Mana Tide, Power Infusion) detected via `IsSpellKnown()`. Local player cooldowns check `GetSpellCooldown()` at seed time for accurate initial state. Multi-rank spells use canonical spell IDs for consistent keys. Displays with class-colored caster names, spell names, and countdown timers (or green "Ready"). Supports text, icon, and icon+label display modes. Cross-zone sync via addon messages (SYNC/CD) shares cooldown states between Triage users.
 
 4. **Display System** — two independently movable, resizable frames (`TriageFrame` for healer rows, `CooldownFrame` for raid cooldowns) with BackdropTemplate. `splitFrames` setting (default false) controls whether cooldowns render in their own frame or merge into TriageFrame. Object-pooled row frames reparented on acquire. Resize handles appear on hover, clamped to content-driven minimums. All periodic logic (preview animation, mana updates, display refresh) runs on BackgroundFrame to avoid hidden-frame OnUpdate deadlock.
 
@@ -25,17 +26,19 @@ Triage is a WoW Classic Anniversary Edition addon that tracks healer mana in gro
 
 6. **Options GUI** — uses the native WoW Settings API (`Settings.RegisterVerticalLayoutCategory` + `Settings.RegisterAddOnCategory`) so options appear in the AddOns tab of the built-in Options panel (ESC > Options > AddOns > Triage). Proxy settings with get/set callbacks to `db`. `/triage` opens directly to the category.
 
+7. **Broadcaster Election** — when multiple players run Triage, only one (the "broadcaster") sends chat warnings. Uses DBM-style deterministic election: leader > assistant > alphabetical name. HELLO/OVERRIDE addon messages discover peers and allow manual override. `/tr sync` opens a window showing all Triage users and the current broadcaster. Heartbeat every 30s, stale pruning at 90s.
+
 ### Code Sections (in order)
 
 | Section | Lines (approx) | Description |
 |---------|----------------|-------------|
 | S1      | 1-58           | Header, DEFAULT_SETTINGS (incl. splitFrames, cdFrame* keys, per-cooldown cd* toggles) |
 | S2      | 59-105         | Local performance caches |
-| S3      | 106-336        | Constants (classes, healing tabs, potions, raid cooldowns, canonical IDs, COOLDOWN_SETTING_KEY, class/talent/tank mappings) |
+| S3      | 106-336        | Constants (classes, healing tabs, potions, raid cooldowns, canonical IDs, COOLDOWN_SETTING_KEY, class/talent/race/tank mappings) |
 | S4      | 337-412        | State variables (incl. cdFrame resize state, context menu, subgroup tracking) |
 | S5      | 413-581        | Utility functions (iteration, colors, measurement, status formatting) |
 | S6      | 582-834        | Healer detection engine (self-spec, inspect results, inspect queue) |
-| S7      | 835-1108       | Group scanning + class cooldown seeding + cooldown grouping |
+| S7      | 835-1108       | Group scanning + class/race cooldown seeding + cross-zone sync + cooldown grouping |
 | S8      | 1109-1147      | Mana updating |
 | S9      | 1148-1208      | Buff/status tracking |
 | S10     | 1209-1293      | Potion + raid cooldown tracking (CLEU) |
@@ -45,12 +48,13 @@ Triage is a WoW Classic Anniversary Edition addon that tracks healer mana in gro
 | S14     | 1564-1644      | Row frame pool (UIParent-parented, reparented on acquire) |
 | S15     | 1645-1714      | Cooldown row frame pool (persistent, reused in place) |
 | S16     | 1715-2325      | Cooldown request menu (click-to-whisper, target selection, caster menus) |
-| S17     | 2326-3012      | Display update (PrepareHealerRowData, RenderHealerRows, RenderCooldownRows, RefreshHealerDisplay, RefreshCooldownDisplay, RefreshMergedDisplay, RefreshDisplay dispatcher) |
-| S18     | 3013-3099      | OnUpdate handler (all logic on BackgroundFrame; per-frame resize-hover only) |
-| S19     | 3100-3342      | Preview system (mock healers + mock cooldowns, both frames) |
-| S20     | 3343-3597      | Options GUI (native Settings API, splitFrames checkbox, per-cooldown toggles) |
-| S21     | 3598-3746      | Event handling (both frame positions restored) |
-| S22     | 3747-3837      | Slash commands + init (lock/reset apply to both frames) |
+| S16b    | 2326-2490      | Sync window (broadcaster election UI, `/tr sync`) |
+| S17     | 2491-3180      | Display update (PrepareHealerRowData, RenderHealerRows, RenderCooldownRows, RefreshHealerDisplay, RefreshCooldownDisplay, RefreshMergedDisplay, RefreshDisplay dispatcher) |
+| S18     | 3181-3290      | OnUpdate handler (all logic on BackgroundFrame; heartbeat + stale pruning; per-frame resize-hover only) |
+| S19     | 3291-3530      | Preview system (mock healers + mock cooldowns, both frames) |
+| S20     | 3531-3830      | Options GUI (native Settings API, splitFrames checkbox, per-cooldown toggles, broadcaster status) |
+| S21     | 3831-3990      | Event handling (both frame positions restored, broadcaster hello/register on group events) |
+| S22     | 3991-4100      | Slash commands + init (lock/reset apply to both frames, sync command) |
 
 ## Features
 
@@ -60,12 +64,14 @@ Triage is a WoW Classic Anniversary Edition addon that tracks healer mana in gro
 - Status indicators: Drinking, Innervate, Mana Tide Totem, Symbol of Hope (text or icon mode, with optional durations)
 - Potion cooldown tracking (2min timer from combat log)
 - Soulstone status indicator on dead healers (purple "SS"/"Soulstone")
-- Raid cooldown tracking with Ready/on-cooldown states: Innervate, Mana Tide, Bloodlust/Heroism, Power Infusion, Rebirth, Lay on Hands, Soulstone, Symbol of Hope (each individually toggleable)
+- Raid cooldown tracking with Ready/on-cooldown states: Innervate, Mana Tide, Bloodlust/Heroism, Power Infusion, Rebirth, Soulstone, Symbol of Hope (each individually toggleable)
 - Cooldown display modes: text only, icons only, or icons with labels
 - Click-to-request cooldowns via whisper (healer rows and cooldown rows)
 - Average mana across all healers
 - Sort healers by lowest mana or alphabetically
 - Optional chat warnings at configurable threshold with cooldown
+- Single-broadcaster election: when multiple Triage users are in group, only the elected broadcaster sends warnings (leader > assist > alphabetical). Manual override via `/tr sync` window.
+- Cross-zone cooldown sync: Triage users share cooldown states via addon messages so cooldowns are accurate even when group members are in different zones
 - Split or merged display: raid cooldowns in their own frame or combined with healer mana
 - Movable, lockable, resizable frames with configurable scale/font/opacity
 - Row highlights and header backgrounds
@@ -100,3 +106,5 @@ When adding any new trackable feature (buff, cooldown, status indicator, etc.), 
 - `GetPlayerInfoByGUID(guid)` — class lookup for cooldown casters
 - `IsSpellKnown(spellId)` — player talent cooldown detection
 - `Settings.RegisterVerticalLayoutCategory()` / `Settings.RegisterAddOnCategory()` / `Settings.RegisterProxySetting()` / `Settings.OpenToCategory()` — native options panel
+- `C_ChatInfo.SendAddonMessage()` / `C_ChatInfo.RegisterAddonMessagePrefix()` — addon-to-addon communication (cooldown sync + broadcaster election)
+- `C_AddOns.GetAddOnMetadata()` / `GetAddOnMetadata()` — addon version retrieval for broadcaster protocol
