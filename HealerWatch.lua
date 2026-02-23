@@ -780,7 +780,8 @@ local function ProcessInspectQueue()
         local guid = entry.guid;
         local unit = entry.unit;
 
-        if UnitExists(unit) and UnitGUID(unit) == guid and UnitIsVisible(unit) then
+        if UnitExists(unit) and UnitGUID(unit) == guid and UnitIsVisible(unit)
+            and CheckInteractDistance(unit, 4) then
             local canInspect = false;
             local ok, result = pcall(CanInspect, unit);
             if ok then canInspect = result; end
@@ -3423,7 +3424,8 @@ BackgroundFrame:SetScript("OnUpdate", function(self, elapsed)
             inspectElapsed = 0;
             if #inspectQueue == 0 and not inspectPending then
                 for guid, data in pairs(healers) do
-                    if data.unit and UnitExists(data.unit) and UnitIsVisible(data.unit) then
+                    if data.unit and UnitExists(data.unit) and UnitIsVisible(data.unit)
+                        and CheckInteractDistance(data.unit, 4) then
                         if not data.inspectConfirmed and HEALER_CAPABLE_CLASSES[data.classFile] then
                             QueueInspect(data.unit);
                         end
