@@ -1770,9 +1770,15 @@ local function CreateRowFrame()
             row.status:ClearAllPoints();
             row.status:SetPoint("TOPLEFT", tip, "TOPLEFT", statusX, yOff);
         end
-        tip:SetSize(statusX + maxStatusW + pad, pad * 2 + count * rowHeight);
+        local tipW = statusX + maxStatusW + pad;
+        tip:SetSize(tipW, pad * 2 + count * rowHeight);
         tip:ClearAllPoints();
-        tip:SetPoint("LEFT", self, "RIGHT", 8, 0);
+        local frameLeft = self:GetParent() and self:GetParent():GetLeft() or self:GetLeft();
+        if frameLeft and frameLeft * self:GetEffectiveScale() >= tipW + 8 then
+            tip:SetPoint("RIGHT", self, "LEFT", -8, 0);
+        else
+            tip:SetPoint("LEFT", self, "RIGHT", 8, 0);
+        end
         tip:Show();
     end);
     frame:SetScript("OnLeave", function(self)
@@ -2012,9 +2018,15 @@ local function CreateCdRowFrame()
             row.name:ClearAllPoints();
             row.name:SetPoint("TOPLEFT", tip, "TOPLEFT", nameX, yOff);
         end
-        tip:SetSize(nameX + maxNameW + pad, pad * 2 + #sorted * rowHeight);
+        local tipW = nameX + maxNameW + pad;
+        tip:SetSize(tipW, pad * 2 + #sorted * rowHeight);
         tip:ClearAllPoints();
-        tip:SetPoint("LEFT", self, "RIGHT", 8, 0);
+        local frameLeft = self:GetParent() and self:GetParent():GetLeft() or self:GetLeft();
+        if frameLeft and frameLeft * self:GetEffectiveScale() >= tipW + 8 then
+            tip:SetPoint("RIGHT", self, "LEFT", -8, 0);
+        else
+            tip:SetPoint("LEFT", self, "RIGHT", 8, 0);
+        end
         tip:Show();
     end);
     frame:SetScript("OnLeave", function(self)
