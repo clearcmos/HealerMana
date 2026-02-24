@@ -1,6 +1,6 @@
 # HealerWatch
 
-**HealerWatch** tracks healer mana and recovery state in group content. It automatically detects healers via talent inspection and displays color-coded mana percentages with recovery indicators — who's drinking, who has Innervate, whose mana potions are on cooldown. It also tracks the availability of mana recovery cooldowns (Innervate, Mana Tide, Symbol of Hope) and healer resurrection tools (Rebirth, Soulstone), with click-to-request coordination to get help where it's needed.
+**HealerWatch** tracks healer mana and recovery state in group content. It automatically detects healers via talent inspection and displays color-coded mana percentages with recovery indicators - who's drinking, who has Innervate, whose mana potions are on cooldown. It also tracks the availability of mana recovery cooldowns (Innervate, Mana Tide, Symbol of Hope) and healer resurrection tools (Rebirth, Soulstone), with click-to-request coordination to get help where it's needed.
 
 Built specifically for **TBC Classic Anniversary**.
 
